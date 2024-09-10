@@ -304,6 +304,10 @@ class TestSmartHTTPCommandResource(ErrorTestMixin, TestCase):
         )
         self.assertEqual(200, self.request.responseCode)
         self.assertEqual(
+            [b"application/x-git-upload-pack-result"],
+            self.request.responseHeaders.getRawHeaders(b"Content-Type"),
+        )
+        self.assertEqual(
             b"001bI am git protocol data."
             b"And I am raw, since we got a good packet to start with.",
             self.request.value,
