@@ -218,12 +218,11 @@ class HTTPPackClientRefsProtocol(HTTPPackClientProtocol):
 class HTTPPackClientCommandProtocol(HTTPPackClientProtocol):
     def startGoodResponse(self):
         """Prepare the HTTP response for forwarding from the backend."""
-        if self.getProtocolVersion() != b"2":
-            self.factory.http_request.setResponseCode(http.OK)
-            self.factory.http_request.setHeader(
-                b"Content-Type",
-                b"application/x-%s-result" % self.factory.command,
-            )
+        self.factory.http_request.setResponseCode(http.OK)
+        self.factory.http_request.setHeader(
+            b"Content-Type",
+            b"application/x-%s-result" % self.factory.command,
+        )
 
 
 class HTTPPackClientFactory(protocol.ClientFactory):
