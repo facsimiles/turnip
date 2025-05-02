@@ -446,6 +446,61 @@ class DiffMergeAPI(BaseAPI):
         return patch
 
 
+@resource(path="/repo/{name}/merge/{target_branch}:{source_branch}")
+class MergeAPI(BaseAPI):
+    """Provides an HTTP API for merging.
+
+    {source_branch} will be merged into {target_branch} within
+    repo {name} (currently we don't support cross-repo)
+    """
+
+    def __init__(self, request, context=None):
+        super().__init__()
+        self.request = request
+
+    @validate_path
+    def post(self, repo_store, repo_name):
+        """Merge a source branch into a target branch.
+
+        This endpoint assumes that the committer is authorized to perform this
+        merge, i.e., it does not check for permissions. The authorization will
+        lie on the system that makes the request (e.g. Launchpad).
+        """
+        committer_name = self.request.json.get("committer_name")
+        committer_email = self.request.json.get("committer_email")
+        commit_message = self.request.json.get("commit_message")
+
+        if not committer_name or not committer_email:
+            return exc.HTTPBadRequest("Committer name and email are required")
+
+        # TODO ines-almeida 2025-04-30 we are starting with only allowing
+        # merging branches within the same repo. In Launchpad, it's very common
+        # that users what to merge cross-repo, so this is something we would
+        # need to implement soon for this to be a useful feature.
+        if len(repo_name.split(":")) > 1:
+            return exc.HTTPBadRequest("We don't yet allow cross-repo merges")
+
+        try:
+            response = store.merge(
+                repo_store,
+                repo_name,
+                self.request.matchdict["target_branch"],
+                self.request.matchdict["source_branch"],
+                committer_name,
+                committer_email,
+                commit_message,
+            )
+        except store.MergeConflicts:
+            return exc.HTTPBadRequest(
+                "Found conflicts between target and source branches"
+            )
+        except store.BranchNotFoundError:
+            return exc.HTTPNotFound()
+        except GitError:
+            return exc.HTTPBadRequest()
+        return response
+
+
 @resource(
     collection_path="/repo/{name}/commits", path="/repo/{name}/commits/{sha1}"
 )

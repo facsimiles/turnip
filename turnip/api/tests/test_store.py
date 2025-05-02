@@ -670,3 +670,130 @@ class InitTestCase(TestCase):
         celery_fixture.waitUntil(
             10, lambda: self.hasZeroLooseObjects(orig_path)
         )
+
+
+class MergeTestCase(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo_store = self.useFixture(TempDir()).path
+        self.useFixture(EnvironmentVariable("REPO_STORE", self.repo_store))
+        self.repo_path = os.path.join(self.repo_store, "repo")
+        self.factory = RepoFactory(self.repo_path)
+        self.repo = self.factory.build()
+
+        self.initial_commit = self.factory.add_commit("initial", "file.txt")
+        self.repo.create_branch("main", self.repo.get(self.initial_commit))
+        self.repo.set_head("refs/heads/main")
+
+        self.feature_commit = self.factory.add_commit(
+            "feature", "file.txt", parents=[self.initial_commit]
+        )
+        self.repo.create_branch("feature", self.repo.get(self.feature_commit))
+
+    def test_merge_successful(self):
+        """Test a successful merge between two branches."""
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            "feature",
+            "Test User",
+            "test@example.com",
+        )
+
+        self.assertIsNotNone(result["merge_commit"])
+        merge_commit = self.repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.parents[0].hex, self.initial_commit.hex)
+        self.assertEqual(merge_commit.parents[1].hex, self.feature_commit.hex)
+
+        self.assertEqual(
+            self.repo.references["refs/heads/main"].target.hex,
+            result["merge_commit"],
+        )
+
+    def test_merge_already_included(self):
+        """Test merge when source is already included in target."""
+        store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            "feature",
+            "Test User",
+            "test@example.com",
+        )
+
+        # Try to merge again
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            "feature",
+            "Test User",
+            "test@example.com",
+        )
+        self.assertIsNone(result["merge_commit"])
+
+    def test_merge_conflicts(self):
+        """Test merge with conflicts."""
+        main_commit = self.factory.add_commit(
+            "main content", "file.txt", parents=[self.initial_commit]
+        )
+        self.repo.references["refs/heads/main"].set_target(main_commit)
+
+        feature_commit = self.factory.add_commit(
+            "feature content", "file.txt", parents=[self.initial_commit]
+        )
+        self.repo.references["refs/heads/feature"].set_target(feature_commit)
+
+        self.assertRaises(
+            store.MergeConflicts,
+            store.merge,
+            self.repo_store,
+            "repo",
+            "main",
+            "feature",
+            "Test User",
+            "test@example.com",
+        )
+
+    def test_merge_custom_message(self):
+        """Test merge with custom commit message."""
+        custom_message = "Custom merge message"
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            "feature",
+            "Test User",
+            "test@example.com",
+            commit_message=custom_message,
+        )
+
+        merge_commit = self.repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.message, custom_message)
+
+    def test_merge_with_invalid_branch_names(self):
+        """Test error handling for invalid branch names."""
+        self.assertRaises(
+            store.BranchNotFoundError,
+            store.merge,
+            self.repo_store,
+            "repo",
+            "main",
+            "invalid/branch/name",
+            "Test User",
+            "test@example.com",
+        )
+
+    def test_merge_with_nonexistent_branches(self):
+        """Test error handling when branches don't exist."""
+        self.assertRaises(
+            store.BranchNotFoundError,
+            store.merge,
+            self.repo_store,
+            "repo",
+            "nonexistent",
+            "feature",
+            "Test User",
+            "test@example.com",
+        )
