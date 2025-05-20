@@ -466,12 +466,25 @@ class MergeAPI(BaseAPI):
         merge, i.e., it does not check for permissions. The authorization will
         lie on the system that makes the request (e.g. Launchpad).
         """
+        target_branch = self.request.matchdict["target_branch"]
+        source_branch = self.request.matchdict["source_branch"]
+
+        target_commit_sha1 = self.request.json.get("target_commit_sha1")
+        source_commit_sha1 = self.request.json.get("source_commit_sha1")
+
+        if not target_commit_sha1 or not source_commit_sha1:
+            return exc.HTTPBadRequest(
+                "target_commit_sha1 and source_commit_sha1 are required"
+            )
+
         committer_name = self.request.json.get("committer_name")
         committer_email = self.request.json.get("committer_email")
         commit_message = self.request.json.get("commit_message")
 
         if not committer_name or not committer_email:
-            return exc.HTTPBadRequest("Committer name and email are required")
+            return exc.HTTPBadRequest(
+                "committer_name and committer_email are required"
+            )
 
         # TODO ines-almeida 2025-04-30 we are starting with only allowing
         # merging branches within the same repo. In Launchpad, it's very common
@@ -484,20 +497,22 @@ class MergeAPI(BaseAPI):
             response = store.merge(
                 repo_store,
                 repo_name,
-                self.request.matchdict["target_branch"],
-                self.request.matchdict["source_branch"],
+                target_branch,
+                target_commit_sha1,
+                source_branch,
+                source_commit_sha1,
                 committer_name,
                 committer_email,
                 commit_message,
             )
         except store.MergeConflicts:
-            return exc.HTTPBadRequest(
+            return exc.HTTPConflict(
                 "Found conflicts between target and source branches"
             )
-        except store.BranchNotFoundError:
-            return exc.HTTPNotFound()
-        except GitError:
-            return exc.HTTPBadRequest()
+        except store.RefNotFoundError as e:
+            return exc.HTTPNotFound(e)
+        except GitError as e:
+            return exc.HTTPBadRequest(e)
         return response
 
 

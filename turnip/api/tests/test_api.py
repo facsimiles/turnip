@@ -1474,6 +1474,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
             {
                 "committer_name": "Test User",
                 "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
             },
         )
 
@@ -1507,6 +1509,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
             {
                 "committer_name": "Test User",
                 "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
             },
         )
 
@@ -1516,6 +1520,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
             {
                 "committer_name": "Test User",
                 "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
             },
         )
 
@@ -1545,11 +1551,13 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
             {
                 "committer_name": "Test User",
                 "committer_email": "test@example.com",
+                "target_commit_sha1": main_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
             },
             expect_errors=True,
         )
 
-        self.assertEqual(400, resp.status_code)
+        self.assertEqual(409, resp.status_code)
         self.assertIn(
             "Found conflicts between target and source branches",
             resp.text,
@@ -1568,6 +1576,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
             {
                 "committer_name": "Test User",
                 "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": "nonexisting",
             },
             expect_errors=True,
         )
@@ -1593,6 +1603,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
             {
                 "committer_name": "Test User",
                 "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
                 "commit_message": custom_message,
             },
         )
@@ -1619,6 +1631,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
             {
                 "committer_name": "Test User",
                 "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
             },
         )
 
@@ -1641,6 +1655,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
             {
                 # Missing committer_email
                 "committer_name": "Test User",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": "test",
             },
             expect_errors=True,
         )

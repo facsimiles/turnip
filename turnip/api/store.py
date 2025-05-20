@@ -716,15 +716,30 @@ class MergeConflicts(Exception):
     pass
 
 
-class BranchNotFoundError(Exception):
+class RefNotFoundError(Exception):
     pass
+
+
+def getBranchTip(repo, branch_name):
+    """Search for a branch within a repo.
+
+    Returns the Oid of the branch's last commit"""
+    try:
+        ref = repo.lookup_reference(f"refs/heads/{branch_name}")
+        return ref.target
+    except (KeyError, ValueError) as e:
+        raise RefNotFoundError(
+            f"Branch '{branch_name}' not found in repo {repo.path}: {e}"
+        )
 
 
 def merge(
     repo_store,
     repo_name,
     target_branch,
+    target_commit_sha1,
     source_branch,
+    source_commit_sha1,
     committer_name,
     committer_email,
     commit_message=None,
@@ -735,28 +750,37 @@ def merge(
     merge strategies still need to be implemented.
 
     :param repo_store: path to the repository store
-    :param repo_name: name of the repository
+    :param repo_name: name of the target repository
+    :param target_commit_sha1: target commit sha1 to merge to
     :param target_branch: target branch to merge into
     :param source_branch: source branch to merge from
+    :param source_commit_sha1: source commit sha1 to merge from
     :param committer_name: name of the committer
     :param committer_email: email of the committer
     :param commit_message: [optional] custom commit message
     """
 
     with open_repo(repo_store, repo_name) as repo:
-        try:
-            target_ref = repo.lookup_reference(f"refs/heads/{target_branch}")
-            source_ref = repo.lookup_reference(f"refs/heads/{source_branch}")
-            target_tip = repo[target_ref.target]
-            source_tip = repo[source_ref.target]
-        except (KeyError, ValueError) as e:
-            raise BranchNotFoundError(f"Branch not found: {str(e)}")
+        target_tip = getBranchTip(repo, target_branch)
+        source_tip = getBranchTip(repo, source_branch)
 
-        original_target_tip = target_ref.target
+        # Check source tip is still the same as when the merge was requested
+        if source_tip.hex != source_commit_sha1:
+            raise GitError("The tip of the source branch has changed")
+
+        # Check target_commit_sha1 exists within the target branch.
+        # We fail the merge if the target branch was re-written
+        if not (
+            target_tip.hex == target_commit_sha1
+            or repo.descendant_of(target_tip, target_commit_sha1)
+        ):
+            raise GitError(
+                "The target commit is not part of the target branch"
+            )
 
         # Check if source is already included in target
-        common_ancestor_id = repo.merge_base(target_tip.oid, source_tip.oid)
-        if common_ancestor_id == source_ref.target:
+        common_ancestor_id = repo.merge_base(target_tip, source_tip)
+        if common_ancestor_id == source_tip:
             return {"merge_commit": None}
 
         # Create an in-memory index for the merge
@@ -773,30 +797,29 @@ def merge(
             )
 
         # Verify that branch hasn't changed since the start of the merge
-        current_target_ref = repo.lookup_reference(
-            f"refs/heads/{target_branch}"
-        )
-        if original_target_tip != current_target_ref.target:
+        target_ref = f"refs/heads/{target_branch}"
+        current_target_ref = repo.lookup_reference(target_ref)
+        if target_tip != current_target_ref.target:
             raise GitError("Target branch was modified during operation")
 
         # Create a merge commit that has both branch tips as parents to
         # preserve the commit history.
         #
         # This is the only write operation in this function. Since it's
-        # a single atomic operation, we don't need additional safety
+        # a single operation, we don't need additional safety
         # mechanisms: if the operation fails, no changes are made; if it
         # succeeds, the merge is complete.
         #
-        # Note also that `create_commit` will raise a GitError a new
+        # Note also that `create_commit` will raise a GitError if a new
         # commit is pushed to the target branch since the start of this
         # merge.
         merge_commit = repo.create_commit(
-            target_ref.name,
+            target_ref,
             committer,
             committer,
             commit_message,
             tree_id,
-            [target_ref.target, source_ref.target],
+            [target_tip, source_tip],
         )
 
         return {"merge_commit": merge_commit.hex}
