@@ -1481,15 +1481,16 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
 
         self.assertEqual(200, resp.status_code)
         self.assertIsNotNone(resp.json["merge_commit"])
-
-        merge_commit = repo.get(resp.json["merge_commit"])
-        self.assertEqual(merge_commit.parents[0].hex, initial_commit.hex)
-        self.assertEqual(merge_commit.parents[1].hex, feature_commit.hex)
-
         self.assertEqual(
             repo.references["refs/heads/main"].target.hex,
             resp.json["merge_commit"],
         )
+
+        merge_commit = repo.get(resp.json["merge_commit"])
+        self.assertEqual(merge_commit.parents[0].hex, initial_commit.hex)
+        self.assertEqual(merge_commit.parents[1].hex, feature_commit.hex)
+        self.assertEqual(merge_commit.committer.name, "Test User")
+        self.assertEqual(merge_commit.committer.email, "test@example.com")
 
     def test_merge_already_included(self):
         """Test merge when source is already included in target."""
@@ -1559,7 +1560,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
 
         self.assertEqual(409, resp.status_code)
         self.assertIn(
-            "Found conflicts between target and source branches",
+            f"Merge conflicts detected between {main_commit.hex} (main) and "
+            f"{feature_commit.hex} (feature)",
             resp.text,
         )
 

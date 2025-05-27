@@ -505,10 +505,8 @@ class MergeAPI(BaseAPI):
                 committer_email,
                 commit_message,
             )
-        except store.MergeConflicts:
-            return exc.HTTPConflict(
-                "Found conflicts between target and source branches"
-            )
+        except store.MergeConflicts as e:
+            return exc.HTTPConflict(e)
         except store.RefNotFoundError as e:
             return exc.HTTPNotFound(e)
         except GitError as e:

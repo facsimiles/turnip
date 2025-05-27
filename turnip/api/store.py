@@ -713,10 +713,14 @@ def get_merge_diff(
 
 
 class MergeConflicts(Exception):
+    """Raised when trying to merge a diff with conflicts"""
+
     pass
 
 
 class RefNotFoundError(Exception):
+    """Raised when trying to fetch a non-existing reference (branch or tag)"""
+
     pass
 
 
@@ -786,7 +790,10 @@ def merge(
         # Create an in-memory index for the merge
         index = repo.merge_commits(target_tip, source_tip)
         if index.conflicts is not None:
-            raise MergeConflicts("Merge conflicts detected")
+            raise MergeConflicts(
+                f"Merge conflicts detected between {target_tip} "
+                f"({target_branch}) and {source_tip} ({source_branch})"
+            )
 
         tree_id = index.write_tree(repo)
 

@@ -9,6 +9,7 @@ import uuid
 import pygit2
 import yaml
 from fixtures import EnvironmentVariable, MonkeyPatch, TempDir
+from pygit2 import Signature
 from testtools import TestCase
 
 from turnip.api import store
@@ -704,14 +705,16 @@ class MergeTestCase(TestCase):
         )
 
         self.assertIsNotNone(result["merge_commit"])
-        merge_commit = self.repo.get(result["merge_commit"])
-        self.assertEqual(merge_commit.parents[0].hex, self.initial_commit.hex)
-        self.assertEqual(merge_commit.parents[1].hex, self.feature_commit.hex)
-
         self.assertEqual(
             self.repo.references["refs/heads/main"].target.hex,
             result["merge_commit"],
         )
+
+        merge_commit = self.repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.parents[0].hex, self.initial_commit.hex)
+        self.assertEqual(merge_commit.parents[1].hex, self.feature_commit.hex)
+        self.assertEqual(merge_commit.committer.name, "Test User")
+        self.assertEqual(merge_commit.committer.email, "test@example.com")
 
     def test_merge_already_included(self):
         """Test merge when source is already included in target."""
@@ -905,10 +908,11 @@ class GetBranchTipTestCase(TestCase):
     def test_get_branch_tip_success(self):
         """Test getting the tip of an existing branch."""
 
+        signature = Signature("Test", "test@example.com")
         commit_oid = self.repo.create_commit(
             "refs/heads/test_branch",
-            self.repo.default_signature,
-            self.repo.default_signature,
+            signature,
+            signature,
             "Initial commit",
             self.repo.TreeBuilder().write(),
             [],
