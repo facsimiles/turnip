@@ -23,6 +23,7 @@ from pygit2 import (
     InvalidSpecError,
     Oid,
     Repository,
+    Signature,
     init_repository,
 )
 from twisted.web import xmlrpc
@@ -709,6 +710,126 @@ def get_merge_diff(
             "patch": patch,
             "conflicts": sorted(conflicts),
         }
+
+
+class MergeConflicts(Exception):
+    """Raised when trying to merge a diff with conflicts"""
+
+    pass
+
+
+class RefNotFoundError(Exception):
+    """Raised when trying to fetch a non-existing reference (branch or tag)"""
+
+    pass
+
+
+def getBranchTip(repo, branch_name):
+    """Search for a branch within a repo.
+
+    Returns the Oid of the branch's last commit"""
+    try:
+        ref = repo.lookup_reference(f"refs/heads/{branch_name}")
+        return ref.target
+    except (KeyError, ValueError) as e:
+        raise RefNotFoundError(
+            f"Branch '{branch_name}' not found in repo {repo.path}: {e}"
+        )
+
+
+def merge(
+    repo_store,
+    repo_name,
+    target_branch,
+    target_commit_sha1,
+    source_branch,
+    source_commit_sha1,
+    committer_name,
+    committer_email,
+    commit_message=None,
+):
+    """Do a regular merge from source branch into target branch.
+
+    This currently only supports a regular merge with a merge commit, other
+    merge strategies still need to be implemented.
+
+    :param repo_store: path to the repository store
+    :param repo_name: name of the target repository
+    :param target_commit_sha1: target commit sha1 to merge to
+    :param target_branch: target branch to merge into
+    :param source_branch: source branch to merge from
+    :param source_commit_sha1: source commit sha1 to merge from
+    :param committer_name: name of the committer
+    :param committer_email: email of the committer
+    :param commit_message: [optional] custom commit message
+    """
+
+    with open_repo(repo_store, repo_name) as repo:
+        target_tip = getBranchTip(repo, target_branch)
+        source_tip = getBranchTip(repo, source_branch)
+
+        # Check source tip is still the same as when the merge was requested
+        if source_tip.hex != source_commit_sha1:
+            raise GitError("The tip of the source branch has changed")
+
+        # Check target_commit_sha1 exists within the target branch.
+        # We fail the merge if the target branch was re-written
+        if not (
+            target_tip.hex == target_commit_sha1
+            or repo.descendant_of(target_tip, target_commit_sha1)
+        ):
+            raise GitError(
+                "The target commit is not part of the target branch"
+            )
+
+        # Check if source is already included in target
+        common_ancestor_id = repo.merge_base(target_tip, source_tip)
+        if common_ancestor_id == source_tip:
+            return {"merge_commit": None}
+
+        # Create an in-memory index for the merge
+        index = repo.merge_commits(target_tip, source_tip)
+        if index.conflicts is not None:
+            raise MergeConflicts(
+                f"Merge conflicts detected between {target_tip} "
+                f"({target_branch}) and {source_tip} ({source_branch})"
+            )
+
+        tree_id = index.write_tree(repo)
+
+        committer = Signature(committer_name, committer_email)
+        if commit_message is None:
+            commit_message = (
+                f"Merge branch '{source_branch}' into {target_branch}"
+            )
+
+        # Verify that branch hasn't changed since the start of the merge
+        target_ref = f"refs/heads/{target_branch}"
+        current_target_ref = repo.lookup_reference(target_ref)
+        if target_tip != current_target_ref.target:
+            raise GitError("Target branch was modified during operation")
+
+        # Create a merge commit that has both branch tips as parents to
+        # preserve the commit history.
+        #
+        # This is the only write operation in this function. Since it's
+        # a single operation, we don't need additional safety
+        # mechanisms: if the operation fails, no changes are made; if it
+        # succeeds, the merge is complete.
+        #
+        # Note also that `create_commit` will raise a GitError if a new
+        # commit is pushed to the target branch since the start of this
+        # merge.
+        merge_commit = repo.create_commit(
+            target_ref,
+            committer,
+            committer,
+            commit_message,
+            tree_id,
+            [target_tip, source_tip],
+        )
+
+        return {"merge_commit": merge_commit.hex}
 
 
 def get_diff(repo_store, repo_name, sha1_from, sha1_to, context_lines=3):

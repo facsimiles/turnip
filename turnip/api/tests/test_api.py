@@ -1456,6 +1456,215 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
         )
         self.assertEqual(404, resp.status_code)
 
+    def test_merge_successful(self):
+        """Test a successful merge between two branches."""
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        feature_commit = factory.add_commit(
+            "feature", "file.txt", parents=[initial_commit]
+        )
+        repo.create_branch("feature", repo.get(feature_commit))
+
+        resp = self.app.post_json(
+            f"/repo/{self.repo_path}/merge/main:feature",
+            {
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
+            },
+        )
+
+        self.assertEqual(200, resp.status_code)
+        self.assertIsNotNone(resp.json["merge_commit"])
+        self.assertEqual(
+            repo.references["refs/heads/main"].target.hex,
+            resp.json["merge_commit"],
+        )
+
+        merge_commit = repo.get(resp.json["merge_commit"])
+        self.assertEqual(merge_commit.parents[0].hex, initial_commit.hex)
+        self.assertEqual(merge_commit.parents[1].hex, feature_commit.hex)
+        self.assertEqual(merge_commit.committer.name, "Test User")
+        self.assertEqual(merge_commit.committer.email, "test@example.com")
+
+    def test_merge_already_included(self):
+        """Test merge when source is already included in target."""
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        feature_commit = factory.add_commit(
+            "feature", "file.txt", parents=[initial_commit]
+        )
+        repo.create_branch("feature", repo.get(feature_commit))
+
+        self.app.post_json(
+            f"/repo/{self.repo_path}/merge/main:feature",
+            {
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
+            },
+        )
+
+        # Try to merge again
+        resp = self.app.post_json(
+            f"/repo/{self.repo_path}/merge/main:feature",
+            {
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
+            },
+        )
+
+        self.assertEqual(200, resp.status_code)
+        self.assertIsNone(resp.json["merge_commit"])
+
+    def test_merge_conflicts(self):
+        """Test merge with conflicts."""
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        # Create conflicting changes
+        main_commit = factory.add_commit(
+            "main change", "file.txt", parents=[initial_commit]
+        )
+        repo.references["refs/heads/main"].set_target(main_commit)
+        feature_commit = factory.add_commit(
+            "feature change", "file.txt", parents=[initial_commit]
+        )
+        repo.create_branch("feature", repo.get(feature_commit))
+
+        resp = self.app.post_json(
+            f"/repo/{self.repo_path}/merge/main:feature",
+            {
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "target_commit_sha1": main_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
+            },
+            expect_errors=True,
+        )
+
+        self.assertEqual(409, resp.status_code)
+        self.assertIn(
+            f"Merge conflicts detected between {main_commit.hex} (main) and "
+            f"{feature_commit.hex} (feature)",
+            resp.text,
+        )
+
+    def test_merge_missing_branches(self):
+        """Test merge with missing branches."""
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        resp = self.app.post_json(
+            f"/repo/{self.repo_path}/merge/main:nonexisting",
+            {
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": "nonexisting",
+            },
+            expect_errors=True,
+        )
+
+        self.assertEqual(404, resp.status_code)
+
+    def test_merge_custom_message(self):
+        """Test merge with custom commit message."""
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        feature_commit = factory.add_commit(
+            "feature", "file.txt", parents=[initial_commit]
+        )
+        repo.create_branch("feature", repo.get(feature_commit))
+
+        custom_message = "Custom merge message"
+        resp = self.app.post_json(
+            f"/repo/{self.repo_path}/merge/main:feature",
+            {
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
+                "commit_message": custom_message,
+            },
+        )
+
+        self.assertEqual(200, resp.status_code)
+        merge_commit = repo.get(resp.json["merge_commit"])
+        self.assertEqual(merge_commit.message, custom_message)
+
+    def test_merge_no_commit_message(self):
+        """Test merge without a custom commit message."""
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        feature_commit = factory.add_commit(
+            "feature", "file.txt", parents=[initial_commit]
+        )
+        repo.create_branch("feature", repo.get(feature_commit))
+
+        resp = self.app.post_json(
+            f"/repo/{self.repo_path}/merge/main:feature",
+            {
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": feature_commit.hex,
+            },
+        )
+
+        self.assertEqual(200, resp.status_code)
+        merge_commit = repo.get(resp.json["merge_commit"])
+        self.assertEqual(
+            merge_commit.message, "Merge branch 'feature' into main"
+        )
+
+    def test_merge_invalid_input(self):
+        """Test merge with invalid input."""
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        resp = self.app.post_json(
+            f"/repo/{self.repo_path}/merge/main:feature",
+            {
+                # Missing committer_email
+                "committer_name": "Test User",
+                "target_commit_sha1": initial_commit.hex,
+                "source_commit_sha1": "test",
+            },
+            expect_errors=True,
+        )
+
+        self.assertEqual(400, resp.status_code)
+
 
 class AsyncRepoCreationAPI(TestCase, ApiRepoStoreMixin):
     def setUp(self):

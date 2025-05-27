@@ -9,6 +9,7 @@ import uuid
 import pygit2
 import yaml
 from fixtures import EnvironmentVariable, MonkeyPatch, TempDir
+from pygit2 import Signature
 from testtools import TestCase
 
 from turnip.api import store
@@ -670,3 +671,266 @@ class InitTestCase(TestCase):
         celery_fixture.waitUntil(
             10, lambda: self.hasZeroLooseObjects(orig_path)
         )
+
+
+class MergeTestCase(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo_store = self.useFixture(TempDir()).path
+        self.useFixture(EnvironmentVariable("REPO_STORE", self.repo_store))
+        self.repo_path = os.path.join(self.repo_store, "repo")
+        self.factory = RepoFactory(self.repo_path)
+        self.repo = self.factory.build()
+
+        self.initial_commit = self.factory.add_commit("initial", "file.txt")
+        self.repo.create_branch("main", self.repo.get(self.initial_commit))
+        self.repo.set_head("refs/heads/main")
+
+        self.feature_commit = self.factory.add_commit(
+            "feature", "file.txt", parents=[self.initial_commit]
+        )
+        self.repo.create_branch("feature", self.repo.get(self.feature_commit))
+
+    def test_merge_successful(self):
+        """Test a successful merge between two branches."""
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+        self.assertIsNotNone(result["merge_commit"])
+        self.assertEqual(
+            self.repo.references["refs/heads/main"].target.hex,
+            result["merge_commit"],
+        )
+
+        merge_commit = self.repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.parents[0].hex, self.initial_commit.hex)
+        self.assertEqual(merge_commit.parents[1].hex, self.feature_commit.hex)
+        self.assertEqual(merge_commit.committer.name, "Test User")
+        self.assertEqual(merge_commit.committer.email, "test@example.com")
+
+    def test_merge_already_included(self):
+        """Test merge when source is already included in target."""
+        store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+        # Try to merge again
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertIsNone(result["merge_commit"])
+
+    def test_merge_conflicts(self):
+        """Test merge with conflicts."""
+        main_commit = self.factory.add_commit(
+            "main content", "file.txt", parents=[self.initial_commit]
+        )
+        self.repo.references["refs/heads/main"].set_target(main_commit)
+
+        feature_commit = self.factory.add_commit(
+            "feature content", "file.txt", parents=[self.initial_commit]
+        )
+        self.repo.references["refs/heads/feature"].set_target(feature_commit)
+
+        self.assertRaises(
+            store.MergeConflicts,
+            store.merge,
+            self.repo_store,
+            "repo",
+            "main",
+            main_commit.hex,
+            "feature",
+            feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+    def test_merge_custom_message(self):
+        """Test merge with custom commit message."""
+        custom_message = "Custom merge message"
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+            commit_message=custom_message,
+        )
+
+        merge_commit = self.repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.message, custom_message)
+
+    def test_merge_with_invalid_branch_names(self):
+        """Test error handling for invalid branch names."""
+        self.assertRaises(
+            store.RefNotFoundError,
+            store.merge,
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "invalid/branch/name",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+    def test_merge_with_nonexistent_branches(self):
+        """Test error handling when branches don't exist."""
+        self.assertRaises(
+            store.RefNotFoundError,
+            store.merge,
+            self.repo_store,
+            "repo",
+            "nonexistent",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+    def test_merge_source_branch_moved_on(self):
+        """Test error handling when source branch tip doesn't match the
+        expected source_commit_sha1."""
+
+        # Add another commit to feature branch after the merge was requested
+        new_feature_commit = self.factory.add_commit(
+            "new feature", "file.txt", parents=[self.feature_commit]
+        )
+        self.repo.references["refs/heads/feature"].set_target(
+            new_feature_commit
+        )
+
+        # Try to merge using the old feature commit SHA1
+        self.assertRaises(
+            pygit2.GitError,
+            store.merge,
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+    def test_merge_target_branch_moved_on(self):
+        """Test merge is successful if target_commit_sha1 refers to a
+        descendant of the current target branch tip."""
+
+        new_main_commit = self.factory.add_commit(
+            "main update", "non-conlict.txt", parents=[self.initial_commit]
+        )
+        self.repo.references["refs/heads/main"].set_target(new_main_commit)
+
+        # Try to merge using the initial commit SHA1 (which is an ancestor of
+        # current main)
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            new_main_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+        # Verify merge was successful
+        self.assertIsNotNone(result["merge_commit"])
+        merge_commit = self.repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.parents[0].hex, new_main_commit.hex)
+        self.assertEqual(merge_commit.parents[1].hex, self.feature_commit.hex)
+
+    def test_merge_target_commit_sha1_not_found(self):
+        """Test error handling when target_commit_sha1 is no longer part of the
+        target branch."""
+
+        # Create a new branch and force update main to point to it
+        new_branch_commit = self.factory.add_commit(
+            "new branch", "file.txt", parents=[]
+        )
+        self.repo.create_branch("new_branch", self.repo.get(new_branch_commit))
+        self.repo.references["refs/heads/main"].set_target(new_branch_commit)
+
+        # Try to merge using the initial commit SHA1 which is no longer in
+        # main's history
+        self.assertRaises(
+            pygit2.GitError,
+            store.merge,
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+
+class GetBranchTipTestCase(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo_store = self.useFixture(TempDir()).path
+        self.useFixture(EnvironmentVariable("REPO_STORE", self.repo_store))
+        self.repo_path = os.path.join(self.repo_store, "repo")
+        self.factory = RepoFactory(self.repo_path)
+        self.repo = self.factory.build()
+
+    def test_get_branch_tip_success(self):
+        """Test getting the tip of an existing branch."""
+
+        signature = Signature("Test", "test@example.com")
+        commit_oid = self.repo.create_commit(
+            "refs/heads/test_branch",
+            signature,
+            signature,
+            "Initial commit",
+            self.repo.TreeBuilder().write(),
+            [],
+        )
+
+        # Get the branch tip
+        tip_oid = store.getBranchTip(self.repo, "test_branch")
+
+        # Verify the tip matches our commit
+        self.assertEqual(tip_oid, commit_oid)
+
+    def test_get_branch_tip_nonexistent(self):
+        """Test getting the tip of a non-existent branch."""
+        e = self.assertRaises(
+            store.RefNotFoundError,
+            store.getBranchTip,
+            self.repo,
+            "nonexistent_branch",
+        )
+
+        self.assertIn("Branch 'nonexistent_branch' not found", str(e))
