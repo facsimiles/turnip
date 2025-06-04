@@ -486,13 +486,6 @@ class MergeAPI(BaseAPI):
                 "committer_name and committer_email are required"
             )
 
-        # TODO ines-almeida 2025-04-30 we are starting with only allowing
-        # merging branches within the same repo. In Launchpad, it's very common
-        # that users what to merge cross-repo, so this is something we would
-        # need to implement soon for this to be a useful feature.
-        if len(repo_name.split(":")) > 1:
-            return exc.HTTPBadRequest("We don't yet allow cross-repo merges")
-
         try:
             response = store.merge(
                 repo_store,

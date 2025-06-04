@@ -1492,6 +1492,58 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
         self.assertEqual(merge_commit.committer.name, "Test User")
         self.assertEqual(merge_commit.committer.email, "test@example.com")
 
+    def test_cross_repo_merge_successful(self):
+        """Test a successful cross-repo merge."""
+        # Create target repo with main branch
+        target_path = os.path.join(self.repo_root, "target")
+        target_factory = RepoFactory(target_path)
+        target_repo = target_factory.build()
+        target_initial = target_factory.add_commit(
+            "target initial", "file.txt"
+        )
+        target_repo.create_branch("main", target_repo.get(target_initial))
+        target_repo.set_head("refs/heads/main")
+
+        # Create source repo with feature branch
+        source_path = os.path.join(self.repo_root, "source")
+        source_factory = RepoFactory(source_path, clone_from=target_factory)
+        source_repo = source_factory.build()
+        source_initial = target_initial
+        source_commit = source_factory.add_commit(
+            "source change", "file.txt", parents=[source_initial]
+        )
+        source_repo.create_branch("feature", source_repo.get(source_commit))
+
+        # Perform cross-repo merge
+        response = self.app.post_json(
+            "/repo/target:source/merge/main:feature",
+            {
+                "target_commit_sha1": target_initial.hex,
+                "source_commit_sha1": source_commit.hex,
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("merge_commit", response.json)
+        self.assertIsNotNone(response.json["merge_commit"])
+
+        # Verify merge commit
+        merge_commit = target_repo.get(response.json["merge_commit"])
+        self.assertEqual(merge_commit.parents[0].hex, target_initial.hex)
+        self.assertEqual(merge_commit.parents[1].hex, source_commit.hex)
+        self.assertEqual(merge_commit.committer.name, "Test User")
+        self.assertEqual(merge_commit.committer.email, "test@example.com")
+
+        # Verify temporary ref was cleaned up
+        self.assertNotIn(
+            "refs/internal/source-feature", target_repo.references
+        )
+
+        # Verify temporary remote was cleaned up
+        self.assertEqual(0, len(target_repo.remotes))
+
     def test_merge_already_included(self):
         """Test merge when source is already included in target."""
         factory = RepoFactory(self.repo_store)
