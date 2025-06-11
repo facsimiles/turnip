@@ -1117,11 +1117,41 @@ class CrossRepoMergeTestCase(TestCase):
         merge_commit = self.target_repo.get(result["merge_commit"])
         self.assertEqual(merge_commit.parents[0].hex, self.target_initial.hex)
         self.assertEqual(merge_commit.parents[1].hex, source_commit.hex)
+        self.assertEqual(
+            merge_commit.message, "Merge branch 'feature' into main"
+        )
 
         # Verify temporary ref was cleaned up
         self.assertIsNone(
             self.target_repo.references.get("refs/internal/source-feature")
         )
+
+    def test_cross_repo_merge_commit_message(self):
+        """Test if a commit message is sent, it's used fot the merge commit."""
+        source_commit = self.source_factory.add_commit(
+            "source change",
+            "file.txt",
+            parents=[self.source_initial],
+        )
+        self.source_repo.lookup_reference(self.source_branch.name).set_target(
+            source_commit
+        )
+
+        result = store.merge(
+            self.repo_store,
+            "target:source",
+            "main",
+            self.target_initial.hex,
+            "feature",
+            source_commit.hex,
+            "Test User",
+            "test@example.com",
+            "A test commit message",
+        )
+
+        self.assertIsNotNone(result["merge_commit"])
+        merge_commit = self.target_repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.message, "A test commit message")
 
     def test_cross_repo_merge_conflicts(self):
         """Test merge conflicts when merging from source repo."""
@@ -1140,7 +1170,7 @@ class CrossRepoMergeTestCase(TestCase):
         )
 
         # Try to merge
-        self.assertRaises(
+        e = self.assertRaises(
             store.MergeConflicts,
             store.merge,
             self.repo_store,
@@ -1151,6 +1181,11 @@ class CrossRepoMergeTestCase(TestCase):
             source_commit.hex,
             "Test User",
             "test@example.com",
+        )
+        self.assertEqual(
+            f"Merge conflicts detected between {target_commit.hex} "
+            f"(main) and {source_commit.hex} (feature)",
+            str(e),
         )
 
         # Verify temporary ref was cleaned up
@@ -1169,7 +1204,7 @@ class CrossRepoMergeTestCase(TestCase):
         )
 
         # Try to merge using old source commit
-        self.assertRaises(
+        e = self.assertRaises(
             pygit2.GitError,
             store.merge,
             self.repo_store,
@@ -1181,3 +1216,4 @@ class CrossRepoMergeTestCase(TestCase):
             "Test User",
             "test@example.com",
         )
+        self.assertEqual("The tip of the source branch has changed", str(e))
