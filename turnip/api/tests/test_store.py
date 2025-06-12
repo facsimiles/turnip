@@ -919,7 +919,7 @@ class GetBranchTipTestCase(TestCase):
         )
 
         # Get the branch tip
-        tip_oid = store.getBranchTip(self.repo, "test_branch")
+        tip_oid = store.get_branch_tip(self.repo, "test_branch")
 
         # Verify the tip matches our commit
         self.assertEqual(tip_oid, commit_oid)
@@ -928,9 +928,292 @@ class GetBranchTipTestCase(TestCase):
         """Test getting the tip of a non-existent branch."""
         e = self.assertRaises(
             store.RefNotFoundError,
-            store.getBranchTip,
+            store.get_branch_tip,
             self.repo,
             "nonexistent_branch",
         )
 
-        self.assertIn("Branch 'nonexistent_branch' not found", str(e))
+        self.assertIn(
+            "Branch 'refs/heads/nonexistent_branch' not found", str(e)
+        )
+
+
+class OpenRemoteTestCase(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo_store = self.useFixture(TempDir()).path
+        self.useFixture(EnvironmentVariable("REPO_STORE", self.repo_store))
+
+        # Create source and target repos
+        self.source_path = os.path.join(self.repo_store, "source")
+        self.target_path = os.path.join(self.repo_store, "target")
+        self.source_factory = RepoFactory(self.source_path)
+        self.target_factory = RepoFactory(self.target_path)
+        self.source_repo = self.source_factory.build()
+        self.target_repo = self.target_factory.build()
+
+    def test_open_remote_creates_and_removes_remote(self):
+        """Test that open_remote creates a remote and removes it after use."""
+        remote_name = "test-remote"
+
+        with store.open_remote(
+            self.source_repo, self.target_path, remote_name
+        ):
+            # Verify remote was created
+            remote = self.source_repo.remotes[remote_name]
+            self.assertEqual(remote.url, f"file://{self.target_path}")
+
+        # Verify remote was removed
+        self.assertNotIn(remote_name, self.source_repo.remotes)
+
+    def test_open_remote_existing_remote(self):
+        """Test that if a remote already exists (due to a previous clean up
+        issue), open_remote will still recreate and remove the remote."""
+        remote_name = "test-remote"
+
+        self.source_repo.remotes.create(remote_name, "file://old_target_path")
+
+        with store.open_remote(
+            self.source_repo, self.target_path, remote_name
+        ):
+            remote = self.source_repo.remotes[remote_name]
+            self.assertEqual(remote.url, f"file://{self.target_path}")
+
+        self.assertNotIn(remote_name, self.source_repo.remotes)
+
+    def test_open_remote_handles_errors(self):
+        """Test that open_remote handles errors and still cleans up."""
+        remote_name = "test-remote"
+
+        def _open_remote_error():
+            with store.open_remote(
+                self.source_repo, self.target_path, remote_name
+            ):
+                raise Exception("Test error")
+
+        self.assertRaises(Exception, _open_remote_error)
+
+        # Verify remote was still removed despite error
+        self.assertNotIn(remote_name, self.source_repo.remotes)
+
+
+class PushTestCase(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo_store = self.useFixture(TempDir()).path
+        self.useFixture(EnvironmentVariable("REPO_STORE", self.repo_store))
+
+        # Create source and target repos
+        self.source_path = os.path.join(self.repo_store, "source")
+        self.target_path = os.path.join(self.repo_store, "target")
+        self.source_factory = RepoFactory(self.source_path)
+        self.target_factory = RepoFactory(self.target_path)
+        self.source_repo = self.source_factory.build()
+        self.target_repo = self.target_factory.build()
+
+        # Create a branch in source repo
+        self.branch_name = "feature"
+        self.initial_commit = self.source_factory.add_commit(
+            "initial", "file.txt"
+        )
+        self.source_repo.create_branch(
+            self.branch_name, self.source_repo.get(self.initial_commit)
+        )
+
+    def test_push_creates_internal_ref(self):
+        """Test that push creates an internal ref in target repo."""
+        remote_ref = store.push(
+            self.repo_store, "source", self.target_repo, self.branch_name
+        )
+
+        # Verify ref was created in target repo
+        self.assertIn(remote_ref, self.target_repo.references)
+        target_ref = self.target_repo.references[remote_ref]
+        source_ref = self.source_repo.references[
+            f"refs/heads/{self.branch_name}"
+        ]
+        self.assertEqual(target_ref.target, source_ref.target)
+
+    def test_push_updates_existing_ref(self):
+        """Test that push updates an existing ref."""
+        # First push
+        remote_ref = store.push(
+            self.repo_store, "source", self.target_repo, self.branch_name
+        )
+
+        # Add new commit to source branch
+        new_commit = self.source_factory.add_commit(
+            "new commit", "file.txt", parents=[self.initial_commit]
+        )
+        self.source_repo.references[
+            f"refs/heads/{self.branch_name}"
+        ].set_target(new_commit)
+
+        # Push again
+        store.push(
+            self.repo_store, "source", self.target_repo, self.branch_name
+        )
+
+        # Verify ref was updated
+        target_ref = self.target_repo.references[remote_ref]
+        self.assertEqual(target_ref.target, new_commit)
+
+
+class CrossRepoMergeTestCase(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo_store = self.useFixture(TempDir()).path
+        self.useFixture(EnvironmentVariable("REPO_STORE", self.repo_store))
+
+        # Create target repo
+        self.target_path = os.path.join(self.repo_store, "target")
+        self.target_factory = RepoFactory(self.target_path)
+        self.target_repo = self.target_factory.build()
+
+        self.target_initial = self.target_factory.add_commit(
+            "target initial", "file.txt"
+        )
+        self.target_branch = self.target_repo.create_branch(
+            "main", self.target_repo.get(self.target_initial)
+        )
+        self.target_repo.set_head("refs/heads/main")
+
+        # Create source repo (forked from target)
+        self.source_path = os.path.join(self.repo_store, "source")
+        self.source_factory = RepoFactory(
+            self.source_path, clone_from=self.target_factory
+        )
+        self.source_repo = self.source_factory.build()
+        self.source_initial = self.target_initial
+        self.source_branch = self.source_repo.create_branch(
+            "feature", self.source_repo.get(self.source_initial)
+        )
+
+    def test_cross_repo_merge_successful(self):
+        """Test successful merge from source repo to target repo."""
+        # Add commits to both branches
+        source_commit = self.source_factory.add_commit(
+            "source change",
+            "file.txt",
+            parents=[self.source_initial],
+        )
+        self.source_repo.lookup_reference(self.source_branch.name).set_target(
+            source_commit
+        )
+
+        result = store.merge(
+            self.repo_store,
+            "target:source",  # target:source format for cross-repo
+            "main",
+            self.target_initial.hex,
+            "feature",
+            source_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+        # Verify merge was successful
+        self.assertIsNotNone(result["merge_commit"])
+        merge_commit = self.target_repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.parents[0].hex, self.target_initial.hex)
+        self.assertEqual(merge_commit.parents[1].hex, source_commit.hex)
+        self.assertEqual(
+            merge_commit.message, "Merge branch 'feature' into main"
+        )
+
+        # Verify temporary ref was cleaned up
+        self.assertIsNone(
+            self.target_repo.references.get("refs/internal/source-feature")
+        )
+
+    def test_cross_repo_merge_commit_message(self):
+        """Test if a commit message is sent, it's used fot the merge commit."""
+        source_commit = self.source_factory.add_commit(
+            "source change",
+            "file.txt",
+            parents=[self.source_initial],
+        )
+        self.source_repo.lookup_reference(self.source_branch.name).set_target(
+            source_commit
+        )
+
+        result = store.merge(
+            self.repo_store,
+            "target:source",
+            "main",
+            self.target_initial.hex,
+            "feature",
+            source_commit.hex,
+            "Test User",
+            "test@example.com",
+            "A test commit message",
+        )
+
+        self.assertIsNotNone(result["merge_commit"])
+        merge_commit = self.target_repo.get(result["merge_commit"])
+        self.assertEqual(merge_commit.message, "A test commit message")
+
+    def test_cross_repo_merge_conflicts(self):
+        """Test merge conflicts when merging from source repo."""
+        # Create conflicting changes in both repos
+        source_commit = self.source_factory.add_commit(
+            "source change", "file.txt", parents=[self.source_initial]
+        )
+        self.source_repo.lookup_reference(self.source_branch.name).set_target(
+            source_commit
+        )
+        target_commit = self.target_factory.add_commit(
+            "target change", "file.txt", parents=[self.target_initial]
+        )
+        self.target_repo.lookup_reference(self.target_branch.name).set_target(
+            target_commit
+        )
+
+        # Try to merge
+        e = self.assertRaises(
+            store.MergeConflicts,
+            store.merge,
+            self.repo_store,
+            "target:source",
+            "main",
+            target_commit.hex,
+            "feature",
+            source_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertEqual(
+            f"Merge conflicts detected between {target_commit.hex} "
+            f"(main) and {source_commit.hex} (feature)",
+            str(e),
+        )
+
+        # Verify temporary ref was cleaned up
+        self.assertIsNone(
+            self.target_repo.references.get("refs/internal/source-feature")
+        )
+
+    def test_cross_repo_merge_source_branch_moved(self):
+        """Test error when source branch tip doesn't match expected commit."""
+        # Add commit to source branch after merge was requested
+        new_source_commit = self.source_factory.add_commit(
+            "new source", "file.txt", parents=[self.source_initial]
+        )
+        self.source_repo.references[self.source_branch.name].set_target(
+            new_source_commit
+        )
+
+        # Try to merge using old source commit
+        e = self.assertRaises(
+            pygit2.GitError,
+            store.merge,
+            self.repo_store,
+            "target:source",
+            "main",
+            self.target_initial.hex,
+            "feature",
+            self.source_initial.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertEqual("The tip of the source branch has changed", str(e))

@@ -22,6 +22,7 @@ from pygit2 import (
     IndexEntry,
     InvalidSpecError,
     Oid,
+    RemoteCallbacks,
     Repository,
     Signature,
     init_repository,
@@ -724,17 +725,98 @@ class RefNotFoundError(Exception):
     pass
 
 
-def getBranchTip(repo, branch_name):
+def get_branch_tip(repo, branch_ref):
     """Search for a branch within a repo.
 
     Returns the Oid of the branch's last commit"""
+    if not branch_ref.startswith("refs/"):
+        branch_ref = f"refs/heads/{branch_ref}"
+
     try:
-        ref = repo.lookup_reference(f"refs/heads/{branch_name}")
+        ref = repo.lookup_reference(branch_ref)
         return ref.target
     except (KeyError, ValueError) as e:
         raise RefNotFoundError(
-            f"Branch '{branch_name}' not found in repo {repo.path}: {e}"
+            f"Branch '{branch_ref}' not found in repo {repo.path}: {e}"
         )
+
+
+@contextmanager
+def open_remote(source_repo, target_repo_path, remote_name):
+    """Opens a remote connection from {source_repo} into a {target_repo_path}.
+
+    :param source_repo: repository where we will create the new remote.
+    :param target_repo_path: path to the target repo
+    :param remote_name: name to give to the new remote
+
+    """
+    try:
+        try:
+            remote = source_repo.remotes.create(
+                remote_name, f"file://{target_repo_path}"
+            )
+        except ValueError:
+            # In the case where a remote wasn't removed correctly
+            source_repo.remotes.set_url(
+                remote_name, f"file://{target_repo_path}"
+            )
+            remote = source_repo.remotes[remote_name]
+        yield remote
+    finally:
+        source_repo.remotes.delete(remote_name)
+
+
+def push(repo_store, source_repo_name, target_repo, source_branch):
+    remote_name = f"{source_repo_name}-{source_branch}"
+    source_ref = f"refs/heads/{source_branch}"
+    remote_ref = f"refs/internal/{remote_name}"
+
+    with open_repo(repo_store, source_repo_name) as source_repo, open_remote(
+        source_repo, target_repo.path, remote_name
+    ) as remote:
+        # Specify which ref to push (source_ref:target_ref)
+        refspec = f"{source_ref}:{remote_ref}"
+
+        # No needed credentials for local file URLs
+        callbacks = RemoteCallbacks(credentials=None)
+        remote.push([refspec], callbacks=callbacks)
+
+    return remote_ref
+
+
+def _get_target_commit(repo, target_branch, target_commit_sha1):
+    """Validate that target commit exists within the target branch, and return
+    it"""
+    target_tip = get_branch_tip(repo, target_branch)
+    if not (
+        target_tip.hex == target_commit_sha1
+        or repo.descendant_of(target_tip, target_commit_sha1)
+    ):
+        raise GitError("The target commit is not part of the target branch")
+    return target_tip
+
+
+def _get_source_commit(repo, source_branch, source_commit_sha1):
+    """Validate that source tip matches the requested commit and return it."""
+    source_tip = get_branch_tip(repo, source_branch)
+    if source_tip.hex != source_commit_sha1:
+        raise GitError("The tip of the source branch has changed")
+    return source_tip
+
+
+def _get_remote_source_tip(
+    repo_store, source_repo_name, repo, source_branch, source_commit_sha1
+):
+    """Get source commit from source repo into target repo"""
+    try:
+        # For cross repo, we push a temporary ref to the target repo
+        source_ref_name = push(
+            repo_store, source_repo_name, repo, source_branch
+        )
+        return _get_source_commit(repo, source_ref_name, source_commit_sha1)
+    finally:
+        # Cleanup temporary refs
+        repo.references.delete(source_ref_name)
 
 
 def merge(
@@ -764,22 +846,30 @@ def merge(
     :param commit_message: [optional] custom commit message
     """
 
+    source_repo_name = None
+    if len(repo_name.split(":")) == 2:
+        repo_name, source_repo_name = repo_name.split(":")
+        if repo_name == source_repo_name:
+            source_repo_name = None
+
+    is_cross_repo = source_repo_name is not None
+
     with open_repo(repo_store, repo_name) as repo:
-        target_tip = getBranchTip(repo, target_branch)
-        source_tip = getBranchTip(repo, source_branch)
+        target_tip = _get_target_commit(
+            repo, target_branch, target_commit_sha1
+        )
 
-        # Check source tip is still the same as when the merge was requested
-        if source_tip.hex != source_commit_sha1:
-            raise GitError("The tip of the source branch has changed")
-
-        # Check target_commit_sha1 exists within the target branch.
-        # We fail the merge if the target branch was re-written
-        if not (
-            target_tip.hex == target_commit_sha1
-            or repo.descendant_of(target_tip, target_commit_sha1)
-        ):
-            raise GitError(
-                "The target commit is not part of the target branch"
+        if is_cross_repo:
+            source_tip = _get_remote_source_tip(
+                repo_store,
+                source_repo_name,
+                repo,
+                source_branch,
+                source_commit_sha1,
+            )
+        else:
+            source_tip = _get_source_commit(
+                repo, source_branch, source_commit_sha1
             )
 
         # Check if source is already included in target
@@ -804,22 +894,17 @@ def merge(
             )
 
         # Verify that branch hasn't changed since the start of the merge
-        target_ref = f"refs/heads/{target_branch}"
-        current_target_ref = repo.lookup_reference(target_ref)
-        if target_tip != current_target_ref.target:
+        current_target_tip = get_branch_tip(repo, target_branch)
+        if target_tip != current_target_tip:
             raise GitError("Target branch was modified during operation")
 
         # Create a merge commit that has both branch tips as parents to
         # preserve the commit history.
         #
-        # This is the only write operation in this function. Since it's
-        # a single operation, we don't need additional safety
-        # mechanisms: if the operation fails, no changes are made; if it
-        # succeeds, the merge is complete.
-        #
-        # Note also that `create_commit` will raise a GitError if a new
+        # Note that `create_commit` will raise a GitError if a new
         # commit is pushed to the target branch since the start of this
         # merge.
+        target_ref = f"refs/heads/{target_branch}"
         merge_commit = repo.create_commit(
             target_ref,
             committer,
