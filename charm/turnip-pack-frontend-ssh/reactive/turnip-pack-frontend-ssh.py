@@ -42,6 +42,16 @@ def turnip_pack_virt_available():
         )
 
 
+@when_not("turnip-pack-virt.available")
+@when("turnip.services.pack-virt")
+def turnip_pack_virt_unavailable():
+    clear_flag("turnip.services.pack-virt")
+    clear_flag("turnip.configured")
+    status.blocked(
+        "turnip-pack-virt must be related to the http interface"
+    )
+
+
 @when(
     "turnip.installed",
     "turnip.services.pack-virt",
