@@ -42,9 +42,7 @@ def turnip_pack_backend_available():
 def turnip_pack_backend_unavailable():
     clear_flag("turnip.services.pack-backend")
     clear_flag("turnip.configured")
-    status.blocked(
-        "turnip-pack-backend must be related to the http interface"
-    )
+    status.blocked("turnip-pack-backend must be related to the http interface")
 
 
 @when("turnip.installed", "turnip.services.pack-backend")
