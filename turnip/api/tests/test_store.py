@@ -709,6 +709,7 @@ class MergeTestCase(TestCase):
             self.repo.references["refs/heads/main"].target.hex,
             result["merge_commit"],
         )
+        self.assertFalse(result["previously_merged"])
 
         merge_commit = self.repo.get(result["merge_commit"])
         self.assertEqual(merge_commit.parents[0].hex, self.initial_commit.hex)
@@ -718,7 +719,7 @@ class MergeTestCase(TestCase):
 
     def test_merge_already_included(self):
         """Test merge when source is already included in target."""
-        store.merge(
+        initial_result = store.merge(
             self.repo_store,
             "repo",
             "main",
@@ -740,7 +741,82 @@ class MergeTestCase(TestCase):
             "Test User",
             "test@example.com",
         )
+        self.assertEqual(
+            initial_result["merge_commit"],
+            result["merge_commit"],
+        )
+        self.assertTrue(result["previously_merged"])
+
+    def test_merge_already_included_old_remerge(self):
+        """Test merge when source is already included in target in the odd case
+        where someone tries to re-merge a commit that has been merged many
+        commits ago."""
+
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+        merge_commit = self.repo.get(result["merge_commit"])
+        self.factory.generate_commits(1001, parents=[merge_commit.oid])
+        latest_commit = self.factory.commits[-1]
+        self.repo.references["refs/heads/main"].set_target(latest_commit)
+
+        # Try to merge again
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertTrue(result["previously_merged"])
         self.assertIsNone(result["merge_commit"])
+
+    def test_merge_already_included_old_commit(self):
+        """Test merge when source is already included in target in the case
+        of an old merge proposal whose target already moved on many commits."""
+
+        self.factory.generate_commits(1001, parents=[self.initial_commit])
+        latest_commit = self.factory.commits[-1]
+        self.repo.references["refs/heads/main"].set_target(latest_commit)
+
+        initial_result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+        # Try to merge again
+        result = store.merge(
+            self.repo_store,
+            "repo",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertTrue(result["previously_merged"])
+        self.assertEqual(
+            initial_result["merge_commit"],
+            result["merge_commit"],
+        )
 
     def test_merge_conflicts(self):
         """Test merge with conflicts."""
