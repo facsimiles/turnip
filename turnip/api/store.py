@@ -66,6 +66,8 @@ def write_alternates(repo_path, alternate_repo_paths):
 
 object_dir_re = re.compile(r"\A[0-9a-f][0-9a-f]\Z")
 
+MAX_DEPTH_SEARCH = 1000
+
 
 @app.task
 def fetch_refs(operations):
@@ -819,6 +821,23 @@ def _get_remote_source_tip(
         repo.references.delete(source_ref_name)
 
 
+def _find_merge_commit(repo, target_tip, source_tip):
+    """Find the merge commit that has source_tip as one of its parents"""
+    walker = repo.walk(target_tip, GIT_SORT_TOPOLOGICAL)
+
+    for i, commit in enumerate(walker):
+        # Limit search depth to a high arbitrary value
+        # This would be a very odd edge-case where the source_tip would have
+        # already been merged >MAX_DEPTH_SEARCH commits ago
+        if i >= MAX_DEPTH_SEARCH:
+            break
+
+        if len(commit.parents) > 1 and source_tip in commit.parent_ids:
+            return commit.hex
+
+    return None
+
+
 def merge(
     repo_store,
     repo_name,
@@ -875,7 +894,11 @@ def merge(
         # Check if source is already included in target
         common_ancestor_id = repo.merge_base(target_tip, source_tip)
         if common_ancestor_id == source_tip:
-            return {"merge_commit": None}
+            merge_commit = _find_merge_commit(repo, target_tip, source_tip)
+            return {
+                "merge_commit": merge_commit,
+                "previously_merged": True,
+            }
 
         # Create an in-memory index for the merge
         index = repo.merge_commits(target_tip, source_tip)
@@ -914,7 +937,10 @@ def merge(
             [target_tip, source_tip],
         )
 
-        return {"merge_commit": merge_commit.hex}
+        return {
+            "merge_commit": merge_commit.hex,
+            "previously_merged": False,
+        }
 
 
 def get_diff(repo_store, repo_name, sha1_from, sha1_to, context_lines=3):

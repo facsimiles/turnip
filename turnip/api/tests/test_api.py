@@ -1557,7 +1557,7 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
         )
         repo.create_branch("feature", repo.get(feature_commit))
 
-        self.app.post_json(
+        initial_resp = self.app.post_json(
             f"/repo/{self.repo_path}/merge/main:feature",
             {
                 "committer_name": "Test User",
@@ -1579,7 +1579,10 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
         )
 
         self.assertEqual(200, resp.status_code)
-        self.assertIsNone(resp.json["merge_commit"])
+        self.assertEqual(
+            initial_resp.json["merge_commit"], resp.json["merge_commit"]
+        )
+        self.assertTrue(resp.json["previously_merged"])
 
     def test_merge_conflicts(self):
         """Test merge with conflicts."""
