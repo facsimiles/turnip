@@ -5,15 +5,20 @@ import os.path
 import re
 import subprocess
 import uuid
+from unittest import mock
 
 import pygit2
 import yaml
 from fixtures import EnvironmentVariable, MonkeyPatch, TempDir
 from pygit2 import Signature
 from testtools import TestCase
+from twisted.internet import reactor as default_reactor
+from twisted.web import server
 
 from turnip.api import store
 from turnip.api.tests.test_helpers import RepoFactory, open_repo
+from turnip.config import config
+from turnip.pack.tests.fake_servers import FakeVirtInfoService
 from turnip.tests.tasks import CeleryWorkerFixture
 
 
@@ -1134,6 +1139,38 @@ class PushTestCase(TestCase):
         target_ref = self.target_repo.references[remote_ref]
         self.assertEqual(target_ref.target, new_commit)
 
+    def test_push_ref_does_not_exist(self):
+        """Test that push raises a RefNotFoundError is ref does not exist."""
+        # First push
+        self.assertRaises(
+            store.RefNotFoundError,
+            store.push,
+            self.repo_store,
+            "source",
+            self.target_repo,
+            "nonexisting",
+        )
+        remote_ref = store.push(
+            self.repo_store, "source", self.target_repo, self.branch_name
+        )
+
+        # Add new commit to source branch
+        new_commit = self.source_factory.add_commit(
+            "new commit", "file.txt", parents=[self.initial_commit]
+        )
+        self.source_repo.references[
+            f"refs/heads/{self.branch_name}"
+        ].set_target(new_commit)
+
+        # Push again
+        store.push(
+            self.repo_store, "source", self.target_repo, self.branch_name
+        )
+
+        # Verify ref was updated
+        target_ref = self.target_repo.references[remote_ref]
+        self.assertEqual(target_ref.target, new_commit)
+
 
 class CrossRepoMergeTestCase(TestCase):
     def setUp(self):
@@ -1293,3 +1330,488 @@ class CrossRepoMergeTestCase(TestCase):
             "test@example.com",
         )
         self.assertEqual("The tip of the source branch has changed", str(e))
+
+
+class RequestMergeTestCase(TestCase):
+    def setUp(self):
+        super().setUp()
+
+        self.repo_store = self.useFixture(TempDir()).path
+        self.useFixture(EnvironmentVariable("REPO_STORE", self.repo_store))
+
+        self.target_repo_path = os.path.join(self.repo_store, "target")
+        self.target_factory = RepoFactory(self.target_repo_path)
+        self.target_repo = self.target_factory.build()
+
+        self.initial_commit = self.target_factory.add_commit(
+            "initial", "file.txt"
+        )
+        self.target_repo.create_branch(
+            "main", self.target_repo.get(self.initial_commit)
+        )
+        self.target_repo.set_head("refs/heads/main")
+        self.feature_commit = self.target_factory.add_commit(
+            "feature", "file.txt", parents=[self.initial_commit]
+        )
+        self.target_repo.create_branch(
+            "feature", self.target_repo.get(self.feature_commit)
+        )
+
+        self.source_repo_path = os.path.join(self.repo_store, "source")
+        self.source_factory = RepoFactory(
+            self.source_repo_path, clone_from=self.target_factory
+        )
+        self.source_repo = self.source_factory.build()
+
+    def test_request_merge_successful(self):
+        """Test successful request merge."""
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            result = store.request_merge(
+                self.repo_store,
+                "target",
+                "main",
+                self.initial_commit.hex,
+                "feature",
+                self.feature_commit.hex,
+                "Test User",
+                "test@example.com",
+            )
+            self.assertTrue(result["queued"])
+            self.assertFalse(result["already_merged"])
+            mock_apply_async.assert_called_once_with(
+                kwargs={
+                    "repo_store": self.repo_store,
+                    "repo_name": "target",
+                    "source_repo_name": None,
+                    "target_branch": "main",
+                    "target_commit_sha1": self.initial_commit.hex,
+                    "source_branch": "feature",
+                    "source_commit_sha1": self.feature_commit.hex,
+                    "committer_name": "Test User",
+                    "committer_email": "test@example.com",
+                    "commit_message": None,
+                }
+            )
+
+    def test_request_merge_successful_source_same_as_target(self):
+        """Test successful request merge."""
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            result = store.request_merge(
+                self.repo_store,
+                "target:target",
+                "main",
+                self.initial_commit.hex,
+                "feature",
+                self.feature_commit.hex,
+                "Test User",
+                "test@example.com",
+            )
+            self.assertTrue(result["queued"])
+            self.assertFalse(result["already_merged"])
+            mock_apply_async.assert_called_once_with(
+                kwargs={
+                    "repo_store": self.repo_store,
+                    "repo_name": "target",
+                    "source_repo_name": None,
+                    "target_branch": "main",
+                    "target_commit_sha1": self.initial_commit.hex,
+                    "source_branch": "feature",
+                    "source_commit_sha1": self.feature_commit.hex,
+                    "committer_name": "Test User",
+                    "committer_email": "test@example.com",
+                    "commit_message": None,
+                }
+            )
+
+    def test_request_merge_already_merged(self):
+        """Test request merge with already merged branches."""
+
+        self.target_repo.references["refs/heads/main"].set_target(
+            self.feature_commit
+        )
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            result = store.request_merge(
+                self.repo_store,
+                "target",
+                "main",
+                self.initial_commit.hex,
+                "feature",
+                self.feature_commit.hex,
+                "Test User",
+                "test@example.com",
+            )
+            self.assertFalse(result["queued"])
+            self.assertTrue(result["already_merged"])
+            mock_apply_async.assert_not_called()
+
+    def test_cross_repo_request_merge_successful(self):
+        """Test successful cross-repo request merge."""
+
+        feature_commit = self.source_factory.add_commit(
+            "feature", "file.txt", parents=[self.initial_commit]
+        )
+        self.source_repo.create_branch(
+            "feature", self.source_repo.get(feature_commit)
+        )
+
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            result = store.request_merge(
+                self.repo_store,
+                "target:source",
+                "main",
+                self.initial_commit.hex,
+                "feature",
+                feature_commit.hex,
+                "Test User",
+                "test@example.com",
+            )
+            self.assertTrue(result["queued"])
+            self.assertFalse(result["already_merged"])
+            mock_apply_async.assert_called_once_with(
+                kwargs={
+                    "repo_store": self.repo_store,
+                    "repo_name": "target",
+                    "source_repo_name": "source",
+                    "target_branch": "main",
+                    "target_commit_sha1": self.initial_commit.hex,
+                    "source_branch": "feature",
+                    "source_commit_sha1": feature_commit.hex,
+                    "committer_name": "Test User",
+                    "committer_email": "test@example.com",
+                    "commit_message": None,
+                }
+            )
+
+    def test_request_merge_source_branch_not_found(self):
+        """Test request merge with a non-existent source branch."""
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            self.assertRaises(
+                store.RefNotFoundError,
+                store.request_merge,
+                self.repo_store,
+                "target",
+                "main",
+                self.initial_commit.hex,
+                "nonexistent_branch",
+                self.feature_commit.hex,
+                "Test User",
+                "test@example.com",
+            )
+            mock_apply_async.assert_not_called()
+
+    def test_request_merge_cross_repo_source_branch_not_found(self):
+        """Test request merge cross-repo  with a non-existent source branch."""
+
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            self.assertRaises(
+                store.RefNotFoundError,
+                store.request_merge,
+                self.repo_store,
+                "target:source",
+                "main",
+                self.initial_commit.hex,
+                "nonexistent_branch",
+                self.feature_commit.hex,
+                "Test User",
+                "test@example.com",
+            )
+            mock_apply_async.assert_not_called()
+
+    def test_merge_source_branch_moved(self):
+        """Test error when source branch tip doesn't match expected commit."""
+
+        new_feature_commit = self.target_factory.add_commit(
+            "new source", "file.txt", parents=[self.feature_commit]
+        )
+        self.target_repo.references["refs/heads/feature"].set_target(
+            new_feature_commit
+        )
+
+        # Try to merge using old source commit
+        e = self.assertRaises(
+            pygit2.GitError,
+            store.request_merge,
+            self.repo_store,
+            "target",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertEqual("The tip of the source branch has changed", str(e))
+
+    def _setup_XML_RPC(self):
+        """Set up test XML-RPC server"""
+        self.virtinfo = FakeVirtInfoService(allowNone=True)
+        self.virtinfo_listener = default_reactor.listenTCP(
+            0, server.Site(self.virtinfo)
+        )
+        self.virtinfo_port = self.virtinfo_listener.getHost().port
+        self.virtinfo_url = b"http://localhost:%d/" % self.virtinfo_port
+        self.addCleanup(self.virtinfo_listener.stopListening)
+        config.defaults["virtinfo_endpoint"] = self.virtinfo_url
+
+    def test_request_merge_successful_async(self):
+        """Test a successful request merge using celery."""
+        self._setup_XML_RPC()
+        celery_fixture = CeleryWorkerFixture()
+        self.useFixture(celery_fixture)
+        self._setup_XML_RPC()
+
+        # Start merge
+        result = store.request_merge(
+            self.repo_store,
+            "target",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertTrue(result["queued"])
+        self.assertFalse(result["already_merged"])
+
+        # Wait for the merge commit to appear on main
+        def merge_done():
+            ref = self.target_repo.references["refs/heads/main"]
+            commit = self.target_repo.get(ref.target)
+            return len(commit.parent_ids) == 2 and (
+                self.initial_commit.hex in [p.hex for p in commit.parents]
+                and self.feature_commit.hex in [p.hex for p in commit.parents]
+            )
+
+        celery_fixture.waitUntil(10, merge_done)
+
+        ref = self.target_repo.references["refs/heads/main"]
+        commit = self.target_repo.get(ref.target)
+        self.assertEqual(len(commit.parent_ids), 2)
+        self.assertIn(self.initial_commit.hex, [p.hex for p in commit.parents])
+        self.assertIn(self.feature_commit.hex, [p.hex for p in commit.parents])
+        self.assertEqual(commit.committer.name, "Test User")
+        self.assertEqual(commit.committer.email, "test@example.com")
+
+    def test_cross_repo_request_merge_successful_async(self):
+        """Test a successful cross-repo request merge using celery."""
+        self._setup_XML_RPC()
+        celery_fixture = CeleryWorkerFixture()
+        self.useFixture(celery_fixture)
+
+        # Add a new commit to source feature branch
+        feature_commit = self.source_factory.add_commit(
+            "feature", "file.txt", parents=[self.initial_commit]
+        )
+        self.source_repo.create_branch(
+            "feature", self.source_repo.get(feature_commit)
+        )
+
+        result = store.request_merge(
+            self.repo_store,
+            "target:source",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertTrue(result["queued"])
+        self.assertFalse(result["already_merged"])
+
+        # Wait for the merge commit to appear on main in the target repo
+        def merge_done():
+            ref = self.target_repo.references["refs/heads/main"]
+            commit = self.target_repo.get(ref.target)
+            return len(commit.parent_ids) == 2 and (
+                self.initial_commit.hex in [p.hex for p in commit.parents]
+                and feature_commit.hex in [p.hex for p in commit.parents]
+            )
+
+        celery_fixture.waitUntil(10, merge_done)
+
+        ref = self.target_repo.references["refs/heads/main"]
+        commit = self.target_repo.get(ref.target)
+        self.assertEqual(len(commit.parent_ids), 2)
+        self.assertIn(self.initial_commit.hex, [p.hex for p in commit.parents])
+        self.assertIn(feature_commit.hex, [p.hex for p in commit.parents])
+        self.assertEqual(commit.committer.name, "Test User")
+        self.assertEqual(commit.committer.email, "test@example.com")
+        # Temporary ref should be cleaned up
+        self.assertIsNone(
+            self.target_repo.references.get("refs/internal/source-feature")
+        )
+
+    def test_request_merge_conflicts_async(self):
+        """Test request merge with conflicts using celery."""
+        self._setup_XML_RPC()
+        celery_fixture = CeleryWorkerFixture()
+        self.useFixture(celery_fixture)
+
+        # Create conflicting changes in both branches
+        main_commit = self.target_factory.add_commit(
+            "main content", "file.txt", parents=[self.initial_commit]
+        )
+        self.target_repo.references["refs/heads/main"].set_target(main_commit)
+
+        feature_commit = self.target_factory.add_commit(
+            "feature content", "file.txt", parents=[self.initial_commit]
+        )
+        self.target_repo.references["refs/heads/feature"].set_target(
+            feature_commit
+        )
+
+        # Start merge
+        result = store.request_merge(
+            self.repo_store,
+            "target",
+            "main",
+            main_commit.hex,
+            "feature",
+            feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertTrue(result["queued"])
+        self.assertFalse(result["already_merged"])
+
+        # Wait for a short time and check that the main branch tip did not
+        # change (no merge commit)
+        def merge_failed():
+            ref = self.target_repo.references["refs/heads/main"]
+            commit = self.target_repo.get(ref.target)
+            # Should still be the main_commit and not a merge commit
+            return (
+                commit.hex == main_commit.hex and len(commit.parent_ids) == 1
+            )
+
+        celery_fixture.waitUntil(5, merge_failed)
+
+        ref = self.target_repo.references["refs/heads/main"]
+        commit = self.target_repo.get(ref.target)
+        self.assertEqual(commit.hex, main_commit.hex)
+        self.assertEqual(len(commit.parent_ids), 1)
+
+    def test_request_merge_already_merged_async(self):
+        """Test request merge when source is already merged into target
+        (async)."""
+        self._setup_XML_RPC()
+        celery_fixture = CeleryWorkerFixture()
+        self.useFixture(celery_fixture)
+
+        # Simulate already merged: set main to feature commit
+        self.target_repo.references["refs/heads/main"].set_target(
+            self.feature_commit
+        )
+
+        result = store.request_merge(
+            self.repo_store,
+            "target",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+        self.assertFalse(result["queued"])
+        self.assertTrue(result["already_merged"])
+        # No new merge commit should appear
+        ref = self.target_repo.references["refs/heads/main"]
+        commit = self.target_repo.get(ref.target)
+        self.assertEqual(commit.hex, self.feature_commit.hex)
+        self.assertEqual(len(commit.parent_ids), 1)
+
+    def test_request_merge_source_branch_moved_async(self):
+        """Test request merge source branch tip moved forward (async)"""
+        self._setup_XML_RPC()
+        celery_fixture = CeleryWorkerFixture()
+        self.useFixture(celery_fixture)
+
+        new_feature_commit = self.target_factory.add_commit(
+            "new feature", "file.txt", parents=[self.feature_commit]
+        )
+        self.target_repo.references["refs/heads/feature"].set_target(
+            new_feature_commit
+        )
+
+        self.assertRaises(
+            pygit2.GitError,
+            store.request_merge,
+            self.repo_store,
+            "target",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,  # old tip
+            "Test User",
+            "test@example.com",
+        )
+
+        ref = self.target_repo.references["refs/heads/main"]
+        commit = self.target_repo.get(ref.target)
+
+        # No merge happended
+        self.assertEqual(commit.hex, self.initial_commit.hex)
+
+    def test_request_merge_target_branch_not_found_async(self):
+        """Test request merge when target branch does not exist (async)."""
+        self._setup_XML_RPC()
+        celery_fixture = CeleryWorkerFixture()
+        self.useFixture(celery_fixture)
+
+        self.assertRaises(
+            store.RefNotFoundError,
+            store.request_merge,
+            self.repo_store,
+            "target",
+            "nonexistent",
+            self.initial_commit.hex,
+            "feature",
+            self.feature_commit.hex,
+            "Test User",
+            "test@example.com",
+        )
+
+        ref = self.target_repo.references["refs/heads/main"]
+        commit = self.target_repo.get(ref.target)
+
+        # No merge happended
+        self.assertEqual(commit.hex, self.initial_commit.hex)
+
+    def test_request_merge_source_sha1_not_found_async(self):
+        """Test request merge when source sha1 does not exist (async)."""
+        self._setup_XML_RPC()
+        celery_fixture = CeleryWorkerFixture()
+        self.useFixture(celery_fixture)
+
+        self.assertRaises(
+            store.GitError,
+            store.request_merge,
+            self.repo_store,
+            "target",
+            "main",
+            self.initial_commit.hex,
+            "feature",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",  # non-existent sha1
+            "Test User",
+            "test@example.com",
+        )
+
+        ref = self.target_repo.references["refs/heads/main"]
+        commit = self.target_repo.get(ref.target)
+        # No merge happended
+        self.assertEqual(commit.hex, self.initial_commit.hex)

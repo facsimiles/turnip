@@ -781,7 +781,11 @@ def push(repo_store, source_repo_name, target_repo, source_branch):
 
         # No needed credentials for local file URLs
         callbacks = RemoteCallbacks(credentials=None)
-        remote.push([refspec], callbacks=callbacks)
+
+        try:
+            remote.push([refspec], callbacks=callbacks)
+        except GitError as e:
+            raise RefNotFoundError(e)
 
     return remote_ref
 
@@ -810,6 +814,7 @@ def _get_remote_source_tip(
     repo_store, source_repo_name, repo, source_branch, source_commit_sha1
 ):
     """Get source commit from source repo into target repo"""
+    source_ref_name = None
     try:
         # For cross repo, we push a temporary ref to the target repo
         source_ref_name = push(
@@ -818,7 +823,8 @@ def _get_remote_source_tip(
         return _get_source_commit(repo, source_ref_name, source_commit_sha1)
     finally:
         # Cleanup temporary refs
-        repo.references.delete(source_ref_name)
+        if source_ref_name:
+            repo.references.delete(source_ref_name)
 
 
 def _find_merge_commit(repo, target_tip, source_tip):
@@ -941,6 +947,223 @@ def merge(
             "merge_commit": merge_commit.hex,
             "previously_merged": False,
         }
+
+
+def request_merge(
+    repo_store,
+    repo_name,
+    target_branch,
+    target_commit_sha1,
+    source_branch,
+    source_commit_sha1,
+    committer_name,
+    committer_email,
+    commit_message=None,
+):
+    """Queue an async regular merge from source branch into target branch.
+
+    :param repo_store: path to the repository store
+    :param repo_name: name of the target repository
+    :param target_commit_sha1: target commit sha1 to merge to
+    :param target_branch: target branch to merge into
+    :param source_branch: source branch to merge from
+    :param source_commit_sha1: source commit sha1 to merge from
+    :param committer_name: name of the committer
+    :param committer_email: email of the committer
+    :param commit_message: [optional] custom commit message
+    """
+
+    source_repo_name = None
+    if len(repo_name.split(":")) == 2:
+        repo_name, source_repo_name = repo_name.split(":")
+        if repo_name == source_repo_name:
+            source_repo_name = None
+
+    with open_repo(repo_store, repo_name) as repo:
+        target_tip = _get_target_commit(
+            repo, target_branch, target_commit_sha1
+        )
+
+        if source_repo_name is not None:
+            source_tip = _get_remote_source_tip(
+                repo_store,
+                source_repo_name,
+                repo,
+                source_branch,
+                source_commit_sha1,
+            )
+        else:
+            source_tip = _get_source_commit(
+                repo, source_branch, source_commit_sha1
+            )
+
+        # Check if source is already included in target
+        common_ancestor_id = repo.merge_base(target_tip, source_tip)
+        if common_ancestor_id == source_tip:
+            return {
+                "queued": False,
+                "already_merged": True,
+            }
+
+    merge_async.apply_async(
+        kwargs=dict(
+            repo_store=repo_store,
+            repo_name=repo_name,
+            source_repo_name=source_repo_name,
+            target_branch=target_branch,
+            target_commit_sha1=target_commit_sha1,
+            source_branch=source_branch,
+            source_commit_sha1=source_commit_sha1,
+            committer_name=committer_name,
+            committer_email=committer_email,
+            commit_message=commit_message,
+        )
+    )
+
+    return {
+        "queued": True,
+        "already_merged": False,
+    }
+
+
+@app.task
+def merge_async(
+    repo_store,
+    repo_name,
+    source_repo_name,
+    target_branch,
+    target_commit_sha1,
+    source_branch,
+    source_commit_sha1,
+    committer_name,
+    committer_email,
+    commit_message,
+):
+    """Task to perform a regular merge from source branch into target branch.
+
+    This currently only supports a regular merge with a merge commit, other
+    merge strategies still need to be implemented.
+
+    :param repo_store: path to the repository store
+    :param repo_name: name of the target repository
+    :param source_repo_name: name of the source repository
+    :param target_commit_sha1: target commit sha1 to merge to
+    :param target_branch: target branch to merge into
+    :param source_branch: source branch to merge from
+    :param source_commit_sha1: source commit sha1 to merge from
+    :param committer_name: name of the committer
+    :param committer_email: email of the committer
+    :param commit_message: [optional] custom commit message
+    """
+
+    logger = tasks_logger
+
+    # Setup xmlrpc to notify Launchpad of a push when merge is successful
+    xmlrpc_endpoint = config.get("virtinfo_endpoint")
+    xmlrpc_timeout = float(config.get("virtinfo_timeout"))
+    xmlrpc_proxy = TimeoutServerProxy(
+        xmlrpc_endpoint, timeout=xmlrpc_timeout, allow_none=True
+    )
+
+    logger.info(
+        f"[{repo_name}] Merging {source_commit_sha1} ({source_branch}) into "
+        f"{target_commit_sha1} ({target_branch}) (committer {committer_name})"
+    )
+
+    with open_repo(repo_store, repo_name) as repo:
+        target_tip = _get_target_commit(
+            repo, target_branch, target_commit_sha1
+        )
+
+        # For cross-repo merge, the source_tip should already be in the target
+        # repo because we checked before queueing the task, but it might be
+        # deleted during garbage collection if the task takes too long to start
+        source_tip_commit = repo.get(source_commit_sha1)
+        if not source_tip_commit and source_repo_name is not None:
+            source_tip = _get_remote_source_tip(
+                repo_store,
+                source_repo_name,
+                repo,
+                source_branch,
+                source_commit_sha1,
+            )
+        elif not source_tip_commit:
+            raise RefNotFoundError(
+                f"[{repo_name}] Cannot find {source_commit_sha1} in repo"
+            )
+        else:
+            source_tip = source_tip_commit.oid
+
+        # Check if source is already included in target
+        common_ancestor_id = repo.merge_base(target_tip, source_tip)
+        if common_ancestor_id == source_tip:
+            logger.info(
+                f"[{repo_name}] {source_commit_sha1} ({source_branch}) "
+                f"already merged into {target_branch}"
+            )
+            return
+
+        # Create an in-memory index for the merge
+        index = repo.merge_commits(target_tip, source_tip)
+        if index.conflicts is not None:
+            raise RefNotFoundError(
+                f"[{repo_name}] Merge conflicts between {source_commit_sha1} "
+                f"({source_branch}) and {target_commit_sha1} ({target_branch})"
+            )
+
+        tree_id = index.write_tree(repo)
+
+        # Verify that branch hasn't changed since the start of the merge
+        current_target_tip = get_branch_tip(repo, target_branch)
+        if target_tip != current_target_tip:
+            raise RefNotFoundError(
+                f"[{repo_name}] Branch {target_branch} was modified during "
+                "merge operation"
+            )
+
+        committer = Signature(committer_name, committer_email)
+        if commit_message is None:
+            commit_message = (
+                f"Merge branch '{source_branch}' into '{target_branch}'"
+            )
+
+        logger.info(f"[{repo_name}] Creating merge commit in {target_branch}")
+        # Create a merge commit that has both branch tips as parents to
+        # preserve the commit history.
+        #
+        # Note that `create_commit` will raise a GitError if a new
+        # commit is pushed to the target branch since the start of this
+        # merge.
+        target_ref = f"refs/heads/{target_branch}"
+        repo.create_commit(
+            target_ref,
+            committer,
+            committer,
+            commit_message,
+            tree_id,
+            [target_tip, source_tip],
+        )
+
+        logger.info(
+            f"[{repo_name}] Successfully merged commit in {target_branch}"
+        )
+
+    repo_path = os.path.join(repo_store, repo_name)
+    loose_object_count, pack_count = get_repack_data(path=repo_path)
+    statistics = dict(
+        {
+            ("loose_object_count", loose_object_count),
+            ("pack_count", pack_count),
+        }
+    )
+    try:
+        xmlrpc_proxy.notify(repo_name, statistics)
+        logger.info(f"[{repo_name}] Push notification sent to LP")
+    except xmlrpc.Fault:
+        logger.error(
+            f"[{repo_name}] Failed to signal LP to notify commit push for "
+            f"repository {repo_path}"
+        )
 
 
 def get_diff(repo_store, repo_name, sha1_from, sha1_to, context_lines=3):
