@@ -1820,8 +1820,8 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
         mock_apply_async.assert_called_with(
             kwargs={
                 "repo_store": self.repo_root,
-                "repo_name": self.repo_path,
-                "source_repo_name": source_path,
+                "repo_name": "target",
+                "source_repo_name": "source",
                 "target_branch": "main",
                 "target_commit_sha1": target_initial.hex,
                 "source_branch": "feature",

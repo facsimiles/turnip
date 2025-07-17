@@ -790,7 +790,7 @@ def push(repo_store, source_repo_name, target_repo, source_branch):
     return remote_ref
 
 
-def _get_target_commit(repo, target_branch, target_commit_sha1):
+def _get_and_check_target_commit(repo, target_branch, target_commit_sha1):
     """Validate that target commit exists within the target branch, and return
     it"""
     target_tip = get_branch_tip(repo, target_branch)
@@ -802,7 +802,7 @@ def _get_target_commit(repo, target_branch, target_commit_sha1):
     return target_tip
 
 
-def _get_source_commit(repo, source_branch, source_commit_sha1):
+def _get_and_check_source_commit(repo, source_branch, source_commit_sha1):
     """Validate that source tip matches the requested commit and return it."""
     source_tip = get_branch_tip(repo, source_branch)
     if source_tip.hex != source_commit_sha1:
@@ -810,7 +810,7 @@ def _get_source_commit(repo, source_branch, source_commit_sha1):
     return source_tip
 
 
-def _get_remote_source_tip(
+def _get_and_check_remote_source_commit(
     repo_store, source_repo_name, repo, source_branch, source_commit_sha1
 ):
     """Get source commit from source repo into target repo"""
@@ -820,7 +820,9 @@ def _get_remote_source_tip(
         source_ref_name = push(
             repo_store, source_repo_name, repo, source_branch
         )
-        return _get_source_commit(repo, source_ref_name, source_commit_sha1)
+        return _get_and_check_source_commit(
+            repo, source_ref_name, source_commit_sha1
+        )
     finally:
         # Cleanup temporary refs
         if source_ref_name:
@@ -880,12 +882,12 @@ def merge(
     is_cross_repo = source_repo_name is not None
 
     with open_repo(repo_store, repo_name) as repo:
-        target_tip = _get_target_commit(
+        target_tip = _get_and_check_target_commit(
             repo, target_branch, target_commit_sha1
         )
 
         if is_cross_repo:
-            source_tip = _get_remote_source_tip(
+            source_tip = _get_and_check_remote_source_commit(
                 repo_store,
                 source_repo_name,
                 repo,
@@ -893,7 +895,7 @@ def merge(
                 source_commit_sha1,
             )
         else:
-            source_tip = _get_source_commit(
+            source_tip = _get_and_check_source_commit(
                 repo, source_branch, source_commit_sha1
             )
 
@@ -964,8 +966,8 @@ def request_merge(
 
     :param repo_store: path to the repository store
     :param repo_name: name of the target repository
-    :param target_commit_sha1: target commit sha1 to merge to
     :param target_branch: target branch to merge into
+    :param target_commit_sha1: target commit sha1 to merge to
     :param source_branch: source branch to merge from
     :param source_commit_sha1: source commit sha1 to merge from
     :param committer_name: name of the committer
@@ -980,12 +982,12 @@ def request_merge(
             source_repo_name = None
 
     with open_repo(repo_store, repo_name) as repo:
-        target_tip = _get_target_commit(
+        target_tip = _get_and_check_target_commit(
             repo, target_branch, target_commit_sha1
         )
 
         if source_repo_name is not None:
-            source_tip = _get_remote_source_tip(
+            source_tip = _get_and_check_remote_source_commit(
                 repo_store,
                 source_repo_name,
                 repo,
@@ -993,7 +995,7 @@ def request_merge(
                 source_commit_sha1,
             )
         else:
-            source_tip = _get_source_commit(
+            source_tip = _get_and_check_source_commit(
                 repo, source_branch, source_commit_sha1
             )
 
@@ -1037,7 +1039,7 @@ def merge_async(
     source_commit_sha1,
     committer_name,
     committer_email,
-    commit_message,
+    commit_message=None,
 ):
     """Task to perform a regular merge from source branch into target branch.
 
@@ -1047,8 +1049,8 @@ def merge_async(
     :param repo_store: path to the repository store
     :param repo_name: name of the target repository
     :param source_repo_name: name of the source repository
-    :param target_commit_sha1: target commit sha1 to merge to
     :param target_branch: target branch to merge into
+    :param target_commit_sha1: target commit sha1 to merge to
     :param source_branch: source branch to merge from
     :param source_commit_sha1: source commit sha1 to merge from
     :param committer_name: name of the committer
@@ -1071,7 +1073,7 @@ def merge_async(
     )
 
     with open_repo(repo_store, repo_name) as repo:
-        target_tip = _get_target_commit(
+        target_tip = _get_and_check_target_commit(
             repo, target_branch, target_commit_sha1
         )
 
@@ -1080,7 +1082,7 @@ def merge_async(
         # deleted during garbage collection if the task takes too long to start
         source_tip_commit = repo.get(source_commit_sha1)
         if not source_tip_commit and source_repo_name is not None:
-            source_tip = _get_remote_source_tip(
+            source_tip = _get_and_check_remote_source_commit(
                 repo_store,
                 source_repo_name,
                 repo,
