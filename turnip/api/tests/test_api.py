@@ -1720,6 +1720,213 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
 
         self.assertEqual(400, resp.status_code)
 
+    def test_request_merge_successful(self):
+        """Test a successful request merge queues the operation."""
+
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        feature_commit = factory.add_commit(
+            "feature", "file.txt", parents=[initial_commit]
+        )
+        repo.create_branch("feature", repo.get(feature_commit))
+
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            resp = self.app.post_json(
+                f"/repo/{self.repo_path}/request-merge/main:feature",
+                {
+                    "committer_name": "Test User",
+                    "committer_email": "test@example.com",
+                    "target_commit_sha1": initial_commit.hex,
+                    "source_commit_sha1": feature_commit.hex,
+                },
+            )
+
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json["queued"])
+        self.assertFalse(resp.json["already_merged"])
+        mock_apply_async.assert_called_once()
+        mock_apply_async.assert_called_with(
+            kwargs={
+                "repo_store": self.repo_root,
+                "repo_name": self.repo_path,
+                "source_repo_name": None,
+                "target_branch": "main",
+                "target_commit_sha1": initial_commit.hex,
+                "source_branch": "feature",
+                "source_commit_sha1": feature_commit.hex,
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "commit_message": None,
+            }
+        )
+
+    def test_request_merge_missing_fields(self):
+        """Test missing required fields returns 400."""
+        resp = self.app.post_json(
+            f"/repo/{self.repo_path}/request-merge/main:feature",
+            {},
+            expect_errors=True,
+        )
+        self.assertEqual(400, resp.status_code)
+        self.assertIn("required", resp.text)
+
+    def test_cross_repo_request_merge_successful(self):
+        """Test a successful cross-repo request_merge."""
+
+        # Create target repo with main branch
+        target_path = os.path.join(self.repo_root, "target")
+        target_factory = RepoFactory(target_path)
+        target_repo = target_factory.build()
+        target_initial = target_factory.add_commit(
+            "target initial", "file.txt"
+        )
+        target_repo.create_branch("main", target_repo.get(target_initial))
+        target_repo.set_head("refs/heads/main")
+
+        # Create source repo with feature branch
+        source_path = os.path.join(self.repo_root, "source")
+        source_factory = RepoFactory(source_path, clone_from=target_factory)
+        source_repo = source_factory.build()
+        source_initial = target_initial
+        source_commit = source_factory.add_commit(
+            "source change", "file.txt", parents=[source_initial]
+        )
+        source_repo.create_branch("feature", source_repo.get(source_commit))
+
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            # Perform cross-repo merge
+            response = self.app.post_json(
+                "/repo/target:source/request-merge/main:feature",
+                {
+                    "target_commit_sha1": target_initial.hex,
+                    "source_commit_sha1": source_commit.hex,
+                    "committer_name": "Test User",
+                    "committer_email": "test@example.com",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json.get("queued"))
+        self.assertFalse(response.json.get("already_merged"))
+        mock_apply_async.assert_called_once()
+        mock_apply_async.assert_called_with(
+            kwargs={
+                "repo_store": self.repo_root,
+                "repo_name": "target",
+                "source_repo_name": "source",
+                "target_branch": "main",
+                "target_commit_sha1": target_initial.hex,
+                "source_branch": "feature",
+                "source_commit_sha1": source_commit.hex,
+                "committer_name": "Test User",
+                "committer_email": "test@example.com",
+                "commit_message": None,
+            }
+        )
+
+        # Verify temporary ref was cleaned up
+        self.assertNotIn(
+            "refs/internal/source-feature", target_repo.references
+        )
+
+        # Verify temporary remote was cleaned up
+        self.assertEqual(0, len(target_repo.remotes))
+
+    def test_request_merge_already_included(self):
+        """Test request_merge when source is already included in target."""
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        feature_commit = factory.add_commit(
+            "feature", "file.txt", parents=[initial_commit]
+        )
+        repo.create_branch("feature", repo.get(feature_commit))
+
+        # Simulate merge
+        repo.head.set_target(feature_commit)
+
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            # Try to merge again
+            resp = self.app.post_json(
+                f"/repo/{self.repo_path}/request-merge/main:feature",
+                {
+                    "committer_name": "Test User",
+                    "committer_email": "test@example.com",
+                    "target_commit_sha1": initial_commit.hex,
+                    "source_commit_sha1": feature_commit.hex,
+                },
+            )
+
+        self.assertEqual(200, resp.status_code)
+        self.assertFalse(resp.json.get("queued"))
+        self.assertTrue(resp.json.get("already_merged"))
+        mock_apply_async.assert_not_called()
+
+    def test_request_merge_missing_branches(self):
+        """Test request_merge with missing branches."""
+
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            resp = self.app.post_json(
+                f"/repo/{self.repo_path}/request-merge/main:nonexisting",
+                {
+                    "committer_name": "Test User",
+                    "committer_email": "test@example.com",
+                    "target_commit_sha1": initial_commit.hex,
+                    "source_commit_sha1": "nonexisting",
+                },
+                expect_errors=True,
+            )
+
+        self.assertEqual(404, resp.status_code)
+        mock_apply_async.assert_not_called()
+
+    def test_request_merge_invalid_input(self):
+        """Test request_merge with invalid input."""
+
+        factory = RepoFactory(self.repo_store)
+        initial_commit = factory.add_commit("initial", "file.txt")
+        repo = factory.build()
+        repo.create_branch("main", repo.get(initial_commit))
+        repo.set_head("refs/heads/main")
+
+        with mock.patch(
+            "turnip.api.store.merge_async.apply_async"
+        ) as mock_apply_async:
+            resp = self.app.post_json(
+                f"/repo/{self.repo_path}/request-merge/main:feature",
+                {
+                    # Missing committer_email
+                    "committer_name": "Test User",
+                    "target_commit_sha1": initial_commit.hex,
+                    "source_commit_sha1": "test",
+                },
+                expect_errors=True,
+            )
+
+        self.assertEqual(400, resp.status_code)
+        mock_apply_async.assert_not_called()
+
 
 class AsyncRepoCreationAPI(TestCase, ApiRepoStoreMixin):
     def setUp(self):
