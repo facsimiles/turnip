@@ -1063,6 +1063,7 @@ def merge_async(
     # Setup xmlrpc to notify Launchpad of a push when merge is successful
     xmlrpc_endpoint = config.get("virtinfo_endpoint")
     xmlrpc_timeout = float(config.get("virtinfo_timeout"))
+    xmlrpc_auth_params = {"user": "+launchpad-services"}
     xmlrpc_proxy = TimeoutServerProxy(
         xmlrpc_endpoint, timeout=xmlrpc_timeout, allow_none=True
     )
@@ -1170,7 +1171,7 @@ def merge_async(
             }
         )
         try:
-            xmlrpc_proxy.notify(repo_name, statistics)
+            xmlrpc_proxy.notify(repo_name, statistics, xmlrpc_auth_params)
             logger.info(f"[{repo_name}] Push notification sent to LP")
         except xmlrpc.Fault:
             logger.error(
