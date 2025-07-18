@@ -1063,6 +1063,7 @@ def merge_async(
     # Setup xmlrpc to notify Launchpad of a push when merge is successful
     xmlrpc_endpoint = config.get("virtinfo_endpoint")
     xmlrpc_timeout = float(config.get("virtinfo_timeout"))
+    xmlrpc_auth_params = {"user": "+launchpad-services"}
     xmlrpc_proxy = TimeoutServerProxy(
         xmlrpc_endpoint, timeout=xmlrpc_timeout, allow_none=True
     )
@@ -1160,7 +1161,6 @@ def merge_async(
         # proposal as merged.
         # In case of failure, we want Launchpad to rescan and get in sync with
         # conflicts, branch deletions, commit sha1 updates, etc...
-        logger.info(f"[{repo_name}] Sending notification to LP")
         repo_path = os.path.join(repo_store, repo_name)
         loose_object_count, pack_count = get_repack_data(path=repo_path)
         statistics = dict(
@@ -1169,13 +1169,17 @@ def merge_async(
                 ("pack_count", pack_count),
             }
         )
+        logger.info(
+            f"[{repo_name}] Sending notification to LP regarding {repo_path} "
+            f"({xmlrpc_auth_params}): {statistics}"
+        )
         try:
-            xmlrpc_proxy.notify(repo_name, statistics)
+            xmlrpc_proxy.notify(repo_name, statistics, xmlrpc_auth_params)
             logger.info(f"[{repo_name}] Push notification sent to LP")
         except xmlrpc.Fault:
             logger.error(
                 f"[{repo_name}] Failed to signal LP to notify commit push for "
-                f"repository {repo_path}"
+                f"repository {repo_path} ({xmlrpc_auth_params})"
             )
 
 
