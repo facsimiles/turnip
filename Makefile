@@ -170,5 +170,19 @@ publish-tarball: build-tarball
 		$(SWIFT_CONTAINER_NAME) $(SWIFT_OBJECT_PATH) \
 		$(TARBALL_BUILD_PATH) turnip=$(TARBALL_BUILD_LABEL)
 
+copy-certificates:
+	mkdir -p /var/lib/haproxy
+	cat turnip.crt turnip.key > /var/lib/haproxy/default.pem
+
+copy-haproxy-turnip-http-config:
+	cat /etc/haproxy/haproxy.cfg haproxy-turnip-http.cfg > /tmp/haproxy.cfg
+	mv /tmp/haproxy.cfg /etc/haproxy/
+
+reload-haproxy: copy-certificates copy-haproxy-turnip-http-config
+	systemctl reload haproxy
+
+install-cgit: reload-haproxy
+
 .PHONY: build check clean dist run-api run-pack test
 .PHONY: build-tarball publish-tarball
+.PHONY: copy-certificates copy-haproxy-turnip-http-config install-cgit reload-haproxy
