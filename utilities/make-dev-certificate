@@ -1,0 +1,52 @@
+#! /usr/bin/python3
+#
+# Copyright 2025 Canonical Ltd.  This software is licensed under the
+# GNU Affero General Public License version 3 (see the file LICENSE).
+
+"""Make a new local development SSL certificate.
+
+This is a very occasional maintenance utility.  It writes new versions of
+turnip.key and turnip.crt, and these changes should be committed.
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+vhosts = [
+    "git.launchpad.test",
+]
+
+
+def main():
+    """Run the script."""
+    repository_root = Path(__file__).parents[1]
+    key = str(repository_root / "turnip.key")
+    certificate = str(repository_root / "turnip.crt")
+    subprocess.check_call(
+        [
+            "openssl",
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:4096",
+            "-nodes",
+            "-sha256",
+            "-subj",
+            "/CN=%s/" % vhosts[0],
+            "-x509",
+            "-days",
+            "3650",
+            "-keyout",
+            key,
+            "-out",
+            certificate,
+        ]
+    )
+    print("Created new local key and self-signed certificate.")
+    subprocess.check_call(["openssl", "x509", "-in", certificate, "-text"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

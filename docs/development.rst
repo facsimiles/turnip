@@ -76,6 +76,15 @@ Start the HTTP API with:
 
    make run-api
 
+Setting up cgit
+---------------
+
+From the top-level directory of the turnip repository, run
+
+.. code:: bash
+
+   sudo make install-cgit
+
 
 Running Launchpad locally as a Git client to turnip
 ---------------------------------------------------
