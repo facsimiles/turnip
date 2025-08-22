@@ -1815,3 +1815,215 @@ class RequestMergeTestCase(TestCase):
         commit = self.target_repo.get(ref.target)
         # No merge happended
         self.assertEqual(commit.hex, self.initial_commit.hex)
+
+
+class DiffStatsStoreTestCase(TestCase):
+    """Test cases for the get_diff_stats function in the store module."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo_store = self.useFixture(TempDir()).path
+        self.useFixture(EnvironmentVariable("REPO_STORE", self.repo_store))
+        self.repo_path = os.path.join(self.repo_store, uuid.uuid1().hex)
+        self.factory = RepoFactory(self.repo_path)
+
+        # Create base commits
+        c1 = self.factory.add_commit("d", "to_delete.txt")
+        c2 = self.factory.add_commit("a", "file.txt", parents=[c1])
+        self.base = self.factory.add_commit("r", "to_rename.txt", parents=[c2])
+
+    def test_get_diff_stats_non_existing_sha1_from(self):
+        """Test file modifications are correctly identified in diff stats"""
+        c1 = self.factory.add_commit("b", "file.txt", parents=[self.base])
+        self.assertRaises(
+            ValueError,
+            store.get_diff_stats,
+            self.repo_store,
+            self.repo_path,
+            "unkonwn",
+            c1.hex,
+            "..",
+        )
+
+    def test_get_diff_stats_non_existing_sha1_to(self):
+        """Test file modifications are correctly identified in diff stats"""
+        self.assertRaises(
+            ValueError,
+            store.get_diff_stats,
+            self.repo_store,
+            self.repo_path,
+            self.base,
+            "unkonwn",
+            "..",
+        )
+
+    def test_get_diff_stats_basic_modified(self):
+        """Test file modifications are correctly identified in diff stats"""
+        c1 = self.factory.add_commit("b", "file.txt", parents=[self.base])
+        stats_mod = store.get_diff_stats(
+            self.repo_store, self.repo_path, self.base.hex, c1.hex, ".."
+        )
+        self.assertEqual([], stats_mod["added"])
+        self.assertIn("file.txt", stats_mod["modified"])
+        self.assertEqual([], stats_mod["deleted"])
+        self.assertEqual([], stats_mod["renamed"])
+
+    def test_get_diff_stats_basic_added(self):
+        """Test file additions are correctly identified in diff stats"""
+        c1 = self.factory.add_commit("n", "new.txt", parents=[self.base])
+        stats_add = store.get_diff_stats(
+            self.repo_store, self.repo_path, self.base.hex, c1.hex, ".."
+        )
+        self.assertIn("new.txt", stats_add["added"])
+        self.assertEqual([], stats_add["modified"])
+        self.assertEqual([], stats_add["deleted"])
+        self.assertEqual([], stats_add["renamed"])
+
+    def test_get_diff_stats_basic_deleted(self):
+        """Test file deletions are correctly identified in diff stats"""
+        # Delete file.txt in next commit (by removing then committing a change)
+        self.factory.repo.index.remove("file.txt")
+        c1 = self.factory.add_commit("y", "another.txt", parents=[self.base])
+        stats_del = store.get_diff_stats(
+            self.repo_store, self.repo_path, self.base.hex, c1.hex, ".."
+        )
+        self.assertIn("another.txt", stats_del["added"])
+        self.assertEqual([], stats_del["modified"])
+        self.assertIn("file.txt", stats_del["deleted"])
+        self.assertEqual([], stats_del["renamed"])
+
+    def test_get_diff_stats_renamed(self):
+        """Test file renames are correctly identified in diff stats"""
+        self.factory.repo.index.remove("to_rename.txt")
+        c1 = self.factory.add_commit("r", "renamed.txt", parents=[self.base])
+
+        stats = store.get_diff_stats(
+            self.repo_store, self.repo_path, self.base.hex, c1.hex, ".."
+        )
+        self.assertEqual([], stats["added"])
+        self.assertEqual([], stats["deleted"])
+        self.assertEqual([], stats["modified"])
+        self.assertEqual(1, len(stats["renamed"]))
+        self.assertEqual(
+            {"old": "to_rename.txt", "new": "renamed.txt"}, stats["renamed"][0]
+        )
+
+    def test_get_diff_stats_multiple_added_modified_deleted(self):
+        """Test diff stats with multiple changes across several commits"""
+        # Create commits to compare against
+        c1 = self.factory.add_commit("f", "file.txt", parents=[self.base])
+        c2 = self.factory.add_commit("n", "new.txt", parents=[c1])
+        self.factory.repo.index.remove("to_delete.txt")
+        c3 = self.factory.add_commit("a", "another.txt", parents=[c2])
+
+        self.factory.repo.index.remove("to_rename.txt")
+        c4 = self.factory.add_commit("r", "renamed.txt", parents=[c3])
+
+        stats = store.get_diff_stats(
+            self.repo_store, self.repo_path, self.base.hex, c4.hex, ".."
+        )
+        self.assertIn("new.txt", stats["added"])
+        self.assertIn("another.txt", stats["added"])
+        self.assertIn("file.txt", stats["modified"])
+        self.assertIn("to_delete.txt", stats["deleted"])
+        self.assertIn(
+            {"old": "to_rename.txt", "new": "renamed.txt"}, stats["renamed"]
+        )
+
+    def test_get_diff_stats_no_from_sha(self):
+        """Test diff stats when comparing against no source commit"""
+        c1 = self.factory.add_commit("b", "file.txt", parents=[self.base])
+        stats = store.get_diff_stats(
+            self.repo_store, self.repo_path, None, c1.hex, "..."
+        )
+        self.assertIn("file.txt", stats["added"])
+        self.assertEqual([], stats["modified"])
+        self.assertEqual([], stats["deleted"])
+        self.assertEqual([], stats["renamed"])
+
+        stats = store.get_diff_stats(
+            self.repo_store, self.repo_path, "", c1.hex, "..."
+        )
+        self.assertIn("file.txt", stats["added"])
+        self.assertEqual([], stats["modified"])
+        self.assertEqual([], stats["deleted"])
+        self.assertEqual([], stats["renamed"])
+
+    def test_get_diff_stats_triple_dot_uses_merge_base(self):
+        """Test that triple-dot diff notation correctly uses common base"""
+        left = self.factory.add_commit("left", "left.txt", parents=[self.base])
+        self.factory.repo.index.remove("left.txt")
+        right = self.factory.add_commit(
+            "right", "right.txt", parents=[self.base]
+        )
+
+        # Compare left...right should use merge-base (base) vs right
+        stats = store.get_diff_stats(
+            self.repo_store, self.repo_path, left.hex, right.hex, "..."
+        )
+        self.assertIn("right.txt", stats["added"])
+        self.assertNotIn("left.txt", stats["added"])
+
+    def test_get_diff_stats_empty_diff(self):
+        """Test diff stats when comparing identical commits"""
+        stats = store.get_diff_stats(
+            self.repo_store, self.repo_path, self.base.hex, self.base.hex, ".."
+        )
+        self.assertEqual([], stats["added"])
+        self.assertEqual([], stats["modified"])
+        self.assertEqual([], stats["deleted"])
+        self.assertEqual([], stats["renamed"])
+
+    def test_cross_repo_basic_diff_stats(self):
+        """Compare commits across repos using ephemeral alternates."""
+        # Create target repo
+        target_path = os.path.join(self.repo_store, "target")
+        target_factory = RepoFactory(target_path)
+        target_repo = target_factory.build()
+        shared_base = target_factory.add_commit("base", "base.txt")
+        target_repo.create_branch("main", target_repo.get(shared_base))
+        target_repo.set_head("refs/heads/main")
+
+        # Create source repo as a clone of target (shares history up to base)
+        source_path = os.path.join(self.repo_store, "source")
+        source_factory = RepoFactory(source_path, clone_from=target_factory)
+        source_change = source_factory.add_commit(
+            "source change", "right.txt", parents=[shared_base]
+        )
+
+        stats = store.get_diff_stats(
+            self.repo_store,
+            "target:source",
+            shared_base.hex,
+            source_change.hex,
+            "..",
+        )
+        self.assertIn("right.txt", stats["added"])
+        self.assertEqual([], stats["modified"])
+
+    def test_cross_repo_empty_from_diff_stats(self):
+        """Empty 'from' should diff against empty tree across repos."""
+        # Create target repo
+        target_path = os.path.join(self.repo_store, "target")
+        target_factory = RepoFactory(target_path)
+        target_repo = target_factory.build()
+        shared_base = target_factory.add_commit("base", "base.txt")
+        target_repo.create_branch("main", target_repo.get(shared_base))
+        target_repo.set_head("refs/heads/main")
+
+        # Create source repo as a clone of target (shares history up to base)
+        source_path = os.path.join(self.repo_store, "source")
+        source_factory = RepoFactory(source_path, clone_from=target_factory)
+        source_change = source_factory.add_commit(
+            "source change", "right.txt", parents=[shared_base]
+        )
+
+        stats = store.get_diff_stats(
+            self.repo_store,
+            "target:source",
+            None,
+            source_change.hex,
+            "..",
+        )
+        self.assertIn("base.txt", stats["added"])  # from initial commit
+        self.assertIn("right.txt", stats["added"])  # from source commit

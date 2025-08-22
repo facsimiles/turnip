@@ -13,6 +13,10 @@ from collections import defaultdict
 import six
 from contextlib2 import ExitStack, contextmanager
 from pygit2 import (
+    GIT_DELTA_ADDED,
+    GIT_DELTA_DELETED,
+    GIT_DELTA_MODIFIED,
+    GIT_DELTA_RENAMED,
     GIT_OBJ_COMMIT,
     GIT_OBJ_TAG,
     GIT_REF_OID,
@@ -1181,6 +1185,69 @@ def merge_async(
                 f"[{repo_name}] Failed to signal LP to notify commit push for "
                 f"repository {repo_path} ({xmlrpc_auth_params})"
             )
+
+
+def _parse_diff(diff):
+    """Parse pygit2.Diff object and return stats
+
+    Currently, only returning file stats (modified, added, deleted, renamed)
+    """
+
+    result = {
+        "added": [],
+        "modified": [],
+        "deleted": [],
+        "renamed": [],
+    }
+
+    for delta in diff.deltas:
+        old_file = delta.old_file.path
+        new_file = delta.new_file.path
+        if delta.status == GIT_DELTA_ADDED:
+            result["added"].append(new_file)
+        elif delta.status == GIT_DELTA_DELETED:
+            result["deleted"].append(old_file)
+        elif delta.status == GIT_DELTA_MODIFIED:
+            result["modified"].append(new_file)
+        elif delta.status == GIT_DELTA_RENAMED:
+            result["renamed"].append({"old": old_file, "new": new_file})
+
+    return result
+
+
+def get_diff_stats(repo_store, repo_name, sha1_from, sha1_to, diff_type):
+    """Get diff stats and associated commits of two sha1s.
+
+    :param sha1_from: diff from sha1. If empty, diffs against empty tree.
+    :param sha1_to: diff to sha1.
+    :param diff_type: type of diff, either '..' (regular diff between the 2
+        commits) or '...' (common ancestor diff)
+    """
+
+    with open_repo(repo_store, repo_name) as repo:
+        # If we want to compare against the base (no source)
+        if sha1_from is None or sha1_from == "":
+            empty_tree_id = repo.TreeBuilder().write()
+            from_tree = repo[empty_tree_id]
+
+        else:
+            # If we want to compare against a common ancestor
+            if diff_type == "...":
+                common_ancestor = repo.merge_base(sha1_from, sha1_to)
+                if common_ancestor is not None:
+                    # We have a merge base
+                    sha1_from = common_ancestor
+
+            from_tree = repo[sha1_from].tree
+
+        to_tree = repo[sha1_to].tree
+
+        diff = repo.diff(from_tree, to_tree)
+        # Enable rename/copy similarity detection so we can classify renames
+        diff.find_similar()
+
+        return _parse_diff(diff)
+    return {}
 
 
 def get_diff(repo_store, repo_name, sha1_from, sha1_to, context_lines=3):

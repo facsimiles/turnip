@@ -1927,6 +1927,164 @@ class ApiTestCase(TestCase, ApiRepoStoreMixin):
         self.assertEqual(400, resp.status_code)
         mock_apply_async.assert_not_called()
 
+    def test_diff_stats_basic(self):
+        """Test diff stats for cases of adding, modifying and deleting files"""
+        repo = RepoFactory(self.repo_store)
+        c1 = repo.add_commit("a", "file.txt")
+        c2 = repo.add_commit("b", "file.txt", parents=[c1])
+        path = f"/repo/{self.repo_path}/compare/{c1}..{c2}/stats"
+        resp = self.app.get(path)
+        self.assertEqual(200, resp.status_code)
+        self.assertIn("modified", resp.json)
+        self.assertIn("file.txt", resp.json["modified"])
+
+        c3 = repo.add_commit("x", "new.txt", parents=[c2])
+        resp2 = self.app.get(
+            f"/repo/{self.repo_path}/compare/{c2}..{c3}/stats"
+        )
+        self.assertIn("new.txt", resp2.json["added"])
+
+        # delete file.txt (remove then commit another file)
+        repo.repo.index.remove("file.txt")
+        c4 = repo.add_commit("y", "another.txt", parents=[c3])
+        resp3 = self.app.get(
+            f"/repo/{self.repo_path}/compare/{c3}..{c4}/stats"
+        )
+        self.assertIn("file.txt", resp3.json["deleted"])
+
+    def test_diff_stats_renamed(self):
+        """Test diff stats for renaming files"""
+        repo = RepoFactory(self.repo_store)
+        c1 = repo.add_commit("foo\n", "foo.txt")
+        repo.repo.index.remove("foo.txt")
+        c2 = repo.add_commit("foo\n", "bar.txt", parents=[c1])
+        resp = self.app.get(f"/repo/{self.repo_path}/compare/{c1}..{c2}/stats")
+        self.assertEqual(200, resp.status_code)
+        self.assertEqual(1, len(resp.json["renamed"]))
+        self.assertEqual(
+            {"old": "foo.txt", "new": "bar.txt"}, resp.json["renamed"][0]
+        )
+
+    def test_diff_stats_triple_dot(self):
+        """Test triple dot diff stats"""
+        repo = RepoFactory(self.repo_store)
+        base = repo.add_commit("base", "base.txt")
+        left = repo.add_commit("left", "left.txt", parents=[base])
+        repo.repo.index.remove("left.txt")
+        right = repo.add_commit("right", "right.txt", parents=[base])
+        resp = self.app.get(
+            f"/repo/{self.repo_path}/compare/{left}...{right}/stats"
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertIn("right.txt", resp.json["added"])
+        self.assertNotIn("left.txt", resp.json["added"])
+
+    def test_diff_stats_invalid_separator(self):
+        """Test invalid separator returns 400 BadRequest"""
+        # invalid separator or invalid shas should result in 400/404
+        RepoFactory(self.repo_store).build()
+        resp = self.app.get(
+            f"/repo/{self.repo_path}/compare/1++2/stats", expect_errors=True
+        )
+        self.assertEqual(400, resp.status_code)
+
+    def test_diff_stats_nonexistent_from_sha(self):
+        """Test diff stats with non-existent 'from' SHA"""
+        repo = RepoFactory(self.repo_store)
+        c1 = repo.add_commit("test", "file.txt")
+
+        # Use a non-existent SHA for the 'from' parameter
+        resp = self.app.get(
+            f"/repo/{self.repo_path}/compare/bar..{c1.hex}/stats",
+            expect_errors=True,
+        )
+        self.assertEqual(404, resp.status_code)
+
+    def test_diff_stats_nonexistent_to_sha(self):
+        """Test diff stats with non-existent 'to' SHA"""
+        repo = RepoFactory(self.repo_store)
+        c1 = repo.add_commit("test", "file.txt")
+
+        # Use a non-existent SHA for the 'to' parameter
+        resp = self.app.get(
+            f"/repo/{self.repo_path}/compare/{c1.hex}..foo/stats",
+            expect_errors=True,
+        )
+        self.assertEqual(404, resp.status_code)
+
+    def test_diff_stats_empty_to_sha(self):
+        """Test diff stats with empty 'to' SHA"""
+        repo = RepoFactory(self.repo_store)
+        c1 = repo.add_commit("a", "file.txt")
+
+        resp = self.app.get(
+            f"/repo/{self.repo_path}/compare/{c1.hex}../stats",
+            expect_errors=True,
+        )
+        self.assertEqual(400, resp.status_code)
+
+    def test_diff_stats_empty_from_sha(self):
+        """Test diff stats with empty 'from' SHA"""
+        repo = RepoFactory(self.repo_store)
+        c1 = repo.add_commit("a", "file.txt")
+
+        resp2 = self.app.get(
+            f"/repo/{self.repo_path}/compare/..{c1.hex}/stats",
+            expect_errors=True,
+        )
+        self.assertEqual(200, resp2.status_code)
+
+    def test_diff_stats_nonexistent_repo(self):
+        """Test diff stats with non-existent repository"""
+        resp = self.app.get(
+            "/repo/nonexistent/compare/abc123..def456/stats",
+            expect_errors=True,
+        )
+        self.assertEqual(404, resp.status_code)
+
+    def test_diff_stats_cross_repo_basic(self):
+        """Test diff stats across two repos via ephemeral alternates."""
+        # Create target repo under expected name
+        target = RepoFactory(self.repo_store)
+        base = target.add_commit("base", "base.txt")
+
+        # Create source repo under a different name and clone from target
+        source_repo_path = os.path.join(self.repo_root, "source")
+        source = RepoFactory(source_repo_path, clone_from=target)
+        source_commit = source.add_commit(
+            "source change", "right.txt", parents=[base]
+        )
+
+        # Cross-repo name format: <target>:<source>
+        path = (
+            f"/repo/{self.repo_path}:source/compare/"
+            f"{base.hex}..{source_commit.hex}/stats"
+        )
+        resp = self.app.get(path)
+        self.assertEqual(200, resp.status_code)
+        self.assertIn("right.txt", resp.json["added"])
+
+    def test_diff_stats_cross_repo_empty_from(self):
+        """Test cross-repo stats when 'from' is empty (diff from empty tree)"""
+        target = RepoFactory(self.repo_store)
+        base = target.add_commit("base", "base.txt")
+
+        source_repo_path = os.path.join(self.repo_root, "source")
+        source = RepoFactory(source_repo_path, clone_from=target)
+        source_commit = source.add_commit(
+            "source change", "right.txt", parents=[base]
+        )
+
+        path = (
+            f"/repo/{self.repo_path}:source/compare/"
+            f"..{source_commit.hex}/stats"
+        )
+        resp = self.app.get(path)
+        self.assertEqual(200, resp.status_code)
+        # Entire tree of the 'to' commit should appear as added
+        self.assertIn("base.txt", resp.json["added"])
+        self.assertIn("right.txt", resp.json["added"])
+
 
 class AsyncRepoCreationAPI(TestCase, ApiRepoStoreMixin):
     def setUp(self):
