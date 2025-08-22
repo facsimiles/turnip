@@ -414,6 +414,53 @@ class DiffAPI(BaseAPI):
         return patch
 
 
+@resource(path="/repo/{name}/compare/{commits}/stats")
+class DiffStatsAPI(BaseAPI):
+    """Provides HTTP API for rev-rev 'double' and 'triple dot' diff stats.
+
+    {commits} can be in the form sha1..sha1 or sha1...sha1.
+    Two dots provides a simple diff, equivalent to `git diff A B`.
+    Three dots provides the symmetric or common ancestor diff, equivalent
+    to `git diff $(git-merge-base A B) B`.
+    The first sha1 can be empty, meaning we want the diff against an empty tree
+    {name} can be two : separated repositories, for a cross repository diff.
+    """
+
+    def __init__(self, request, context=None):
+        super().__init__()
+        self.request = request
+
+    @validate_path
+    def get(self, repo_store, repo_name):
+        """Returns diff statas of two commits."""
+        commits = re.split(r"(\.{2,3})", self.request.matchdict["commits"])
+        if not len(commits) == 3:
+            return exc.HTTPBadRequest()
+
+        sha1_from = commits[0]
+        diff_type = commits[1]
+        sha1_to = commits[2]
+
+        # sha1_to shouldn't be empty
+        if sha1_to == "" or sha1_to is None:
+            return exc.HTTPBadRequest(
+                "You need to set the last commit against which to compare"
+            )
+
+        try:
+            diff_stats = store.get_diff_stats(
+                repo_store,
+                repo_name,
+                sha1_from,
+                sha1_to,
+                diff_type,
+            )
+        except (KeyError, ValueError, GitError):
+            # invalid pygit2 sha1's return ValueError: 1: Ambiguous lookup
+            return exc.HTTPNotFound()
+        return diff_stats
+
+
 @resource(path="/repo/{name}/compare-merge/{base}:{head}")
 class DiffMergeAPI(BaseAPI):
     """Provides an HTTP API for merge previews.
