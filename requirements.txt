@@ -24,7 +24,7 @@ hyperlink==19.0.0
 idna==2.9
 incremental==17.5.0
 kombu==4.6.11
-lazr.sshserver==0.1.13
+lazr.sshserver==0.1.15
 linecache2==1.0.0
 lxml==4.5.2
 Paste==3.5.0
