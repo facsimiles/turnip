@@ -39,6 +39,10 @@ options:
     type: int
     default: 30
     description: Time out cgit processes after this many seconds.
+  cgit_kill_timeout:
+    type: int
+    default: 15
+    description: Kill cgit processes after this many seconds.
   virtinfo_endpoint:
     type: string
     default: http://localhost:6543/githosting
