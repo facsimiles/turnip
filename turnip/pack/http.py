@@ -748,6 +748,29 @@ class HTTPAuthRootResource(BaseHTTPAuthResource):
 
     def render_GET(self, request):
         session = self._getSession(request)
+
+        # Require authentication for public repo access via cgit
+        if (
+            self.root.cgit_require_auth_for_public_repos
+            and "user" not in session
+        ):
+            if self.signer is None:
+                fail_request(
+                    request,
+                    "Server does not support OpenID authentication.",
+                    code=http.FORBIDDEN,
+                )
+                return server.NOT_DONE_YET
+            try:
+                self._beginLogin(request, session)
+            except Exception:
+                fail_request(
+                    request,
+                    "Authentication service unavailable.",
+                    code=http.SERVICE_UNAVAILABLE,
+                )
+            return server.NOT_DONE_YET
+
         identity_url = session.get("identity_url", self.anonymous_id)
         proxy = xmlrpc.Proxy(self.root.virtinfo_endpoint, allowNone=True)
         d = proxy.callRemote(
@@ -839,6 +862,10 @@ class SmartHTTPFrontendResource(resource.Resource):
                 self.cgit_secret = cgit_secret_file.read()
         else:
             self.cgit_secret = None
+        self.cgit_require_auth_for_public_repos = (
+            str(config.get("cgit_require_auth_for_public_repos")).lower()
+            == "true"
+        )
 
     @staticmethod
     def _isGitRequest(request):
