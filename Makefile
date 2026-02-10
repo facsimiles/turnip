@@ -181,8 +181,12 @@ copy-haproxy-turnip-http-config:
 reload-haproxy: copy-certificates copy-haproxy-turnip-http-config
 	systemctl reload haproxy
 
-install-cgit: reload-haproxy
+trust-lp-dev-cert:
+	cp launchpad-test.crt /usr/local/share/ca-certificates/
+	update-ca-certificates
+
+install-cgit: reload-haproxy trust-lp-dev-cert
 
 .PHONY: build check clean dist run-api run-pack test
 .PHONY: build-tarball publish-tarball
-.PHONY: copy-certificates copy-haproxy-turnip-http-config install-cgit reload-haproxy
+.PHONY: copy-certificates copy-haproxy-turnip-http-config install-cgit reload-haproxy trust-lp-dev-cert
