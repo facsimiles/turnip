@@ -16,7 +16,8 @@ virtinfo_endpoint: http://xmlrpc-private.launchpad.test:8087/git
 virtinfo_timeout: 15
 cgit_exec_path: /usr/lib/cgit/cgit.cgi
 cgit_data_path: /usr/share/cgit
-cgit_secret_path: null
+cgit_secret_path: ./cgit-secret.dev
+cgit_require_auth_for_public_repos: false
 openid_provider_root: https://testopenid.test/
 site_name: git.launchpad.test
 main_site_root: https://launchpad.test/

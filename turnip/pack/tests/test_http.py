@@ -100,6 +100,7 @@ class FakeRoot:
         self.backend_connected = defer.Deferred()
         self.repo_store = repo_store
         self.cgit_exec_path = config.get("cgit_exec_path")
+        self.cgit_require_auth_for_public_repos = False
         self.site_name = "turnip"
 
     def authenticateWithPassword(self, user, password):
@@ -427,6 +428,42 @@ class TestHTTPAuthRootResource(TestCase):
             request.responseHeaders.getRawHeaders(b"location"),
         )
 
+    def test_cgit_require_auth_for_public_repos_no_signer_returns_403(self):
+        root = self.root
+        root.cgit_require_auth_for_public_repos = True
+        request = LessFakeRequest([""])
+        request.method = b"GET"
+        request.path = b"/example"
+        render_resource(http.HTTPAuthRootResource(root), request)
+        self.assertEqual(403, request.responseCode)
+        self.assertEqual(
+            b"Server does not support OpenID authentication.", request.value
+        )
+
+    def test_cgit_require_auth_for_public_repos_redirects_to_login(self):
+        root = self.root
+        root.cgit_require_auth_for_public_repos = True
+        root.cgit_secret = b"test-secret-key"
+        root.openid_provider_root = "https://testopenid.test/"
+        request = LessFakeRequest([""])
+        request.method = b"GET"
+        request.path = b"/example"
+        request.uri = b"http://fake.example.com/example"
+
+        resource = http.HTTPAuthRootResource(root)
+        resource._makeConsumer = mock.Mock()
+        openid_request = mock.Mock()
+        openid_request.redirectURL.return_value = "http://openid.redirect.test"
+        resource._makeConsumer.return_value.begin.return_value = openid_request
+
+        resource.render_GET(request)
+
+        self.assertEqual(302, request.responseCode)
+        self.assertEqual(
+            [b"http://openid.redirect.test"],
+            request.responseHeaders.getRawHeaders(b"location"),
+        )
+
     def test_translatePath_timeout(self):
         root = self.root
         request = LessFakeRequest([""])
@@ -453,6 +490,36 @@ class TestHTTPAuthRootResource(TestCase):
         request.path = b"/example"
         request.uri = b"http://fake.example.com/example"
         yield render_resource(http.HTTPAuthRootResource(root), request)
+        response_content = b"".join(request.written)
+        self.assertIn(b"Repository seems to be empty", response_content)
+
+    @defer.inlineCallbacks
+    def test_cgit_require_auth_for_public_repos_authenticated_renders_cgit(
+        self,
+    ):
+        root = self.root
+        root.cgit_require_auth_for_public_repos = True
+        root.cgit_secret = b"test-secret-key"
+        root.openid_provider_root = "https://testopenid.test/"
+        store.init_repo(
+            os.path.join(
+                root.repo_store, self.virtinfo.getInternalPath("/example")
+            )
+        )
+        resource = http.HTTPAuthRootResource(root)
+        session_data = {
+            "identity_url": "http://lp.test/testuser",
+            "user": "testuser",
+        }
+        cookie_content = resource.signer.sign(
+            encode_cookie(json.dumps(session_data))
+        )
+        request = LessFakeRequest([""])
+        request.method = b"GET"
+        request.path = b"/example"
+        request.uri = b"http://fake.example.com/example"
+        request.cookies[resource.cookie_name] = cookie_content
+        yield render_resource(resource, request)
         response_content = b"".join(request.written)
         self.assertIn(b"Repository seems to be empty", response_content)
 

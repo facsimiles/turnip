@@ -85,6 +85,9 @@ From the top-level directory of the turnip repository, run
 
    sudo make install-cgit
 
+This sets up cgit and HAProxy with working authentication via the test
+OpenID 2.0 provider in the local Launchpad development environment for
+browsing private repositories.
 
 Running Launchpad locally as a Git client to turnip
 ---------------------------------------------------
