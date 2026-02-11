@@ -10,7 +10,7 @@ from fixtures import TempDir
 from openid.consumer import consumer
 from paste.auth.cookie import encode as encode_cookie
 from testtools import TestCase
-from testtools.deferredruntest import AsynchronousDeferredRunTest
+from testtools.twistedsupport import AsynchronousDeferredRunTest
 from twisted.internet import defer
 from twisted.internet import reactor as default_reactor
 from twisted.internet import task, testing
