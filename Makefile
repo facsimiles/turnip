@@ -187,6 +187,56 @@ trust-lp-dev-cert:
 
 install-cgit: reload-haproxy trust-lp-dev-cert
 
-.PHONY: build check clean dist run-api run-pack test
+# Build wheels from vendored sdists that cannot be installed directly by
+# pip 9.x (e.g. packages using pyproject.toml with hatchling/flit build
+# systems).  Uses only system Python and vendored sdists — no internet
+# access, no pre-built binaries from PyPI.
+#
+# Trust chain:
+#   system python3 (Ubuntu) → pip from vendored sdist → build tools from
+#   vendored sdists (--no-build-isolation) → wheel built from vendored sdist
+#
+# To rebuild:  make build-testtools-wheel
+# To verify:   compare the .whl contents against the corresponding sdist
+
+WHEEL_BUILD_ENV := $(CURDIR)/.testtools-wheel-build-env
+WHEEL_BUILD_SDISTS := $(PIP_SOURCE_DIR)/testtools-wheel-build
+WHEEL_PIP := $(WHEEL_BUILD_ENV)/bin/pip
+WHEEL_PYTHON := $(WHEEL_BUILD_ENV)/bin/python
+WHEEL_FLAGS := --no-build-isolation --no-index --no-deps --find-links=file://$(shell readlink -f $(WHEEL_BUILD_SDISTS))/
+
+build-testtools-wheel: $(PIP_SOURCE_DIR)
+	rm -rf $(WHEEL_BUILD_ENV)
+	python3 -m venv $(WHEEL_BUILD_ENV)
+	# Bootstrap pip from vendored sdist
+	cd /tmp && tar xzf $(CURDIR)/$(WHEEL_BUILD_SDISTS)/pip-22.3.1.tar.gz && \
+		cd pip-22.3.1 && $(WHEEL_PYTHON) -m pip install --no-deps . && \
+		rm -rf /tmp/pip-22.3.1
+	# Layer 0: self-hosting packages (no external build deps)
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/flit_core-3.12.0.tar.gz
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/setuptools-75.3.4.tar.gz
+	# Layer 1: packages built with flit_core
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/tomli-2.0.2.tar.gz
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/packaging-26.0.tar.gz
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/pathspec-0.12.1.tar.gz
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/typing_extensions-4.13.2.tar.gz
+	# Layer 2: packages built with setuptools
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/calver-2022.6.26.tar.gz
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/trove_classifiers-2026.1.14.14.tar.gz
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/setuptools_scm-9.2.2.tar.gz
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/pluggy-1.5.0.tar.gz
+	# Layer 3: hatchling (self-hosting) and hatch-vcs
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/hatchling-1.27.0.tar.gz
+	$(WHEEL_PIP) install $(WHEEL_FLAGS) $(WHEEL_BUILD_SDISTS)/hatch_vcs-0.4.0.tar.gz
+	# Build testtools wheel from the main dependencies directory
+	$(WHEEL_PIP) wheel --no-build-isolation --no-index --no-deps \
+		--find-links=file://$(shell readlink -f $(PIP_SOURCE_DIR))/ \
+		--find-links=file://$(shell readlink -f $(WHEEL_BUILD_SDISTS))/ \
+		--wheel-dir=$(PIP_SOURCE_DIR) \
+		$(PIP_SOURCE_DIR)/testtools-2.7.2.tar.gz
+	rm -rf $(WHEEL_BUILD_ENV)
+	@echo "Built: $(PIP_SOURCE_DIR)/testtools-2.7.2-py3-none-any.whl"
+
+.PHONY: build check clean dist run-api run-pack test build-testtools-wheel
 .PHONY: build-tarball publish-tarball
 .PHONY: copy-certificates copy-haproxy-turnip-http-config install-cgit reload-haproxy trust-lp-dev-cert
