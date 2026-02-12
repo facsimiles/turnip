@@ -76,8 +76,11 @@ bootstrap-test:
 	-sudo rabbitmqctl add_vhost turnip-test-vhost
 	-sudo rabbitmqctl set_permissions -p "turnip-test-vhost" "guest" ".*" ".*" ".*"
 
+COVERAGE := $(ENV)/bin/coverage
+
 test: $(ENV) bootstrap-test
-	$(PYTHON) -m unittest discover $(ARGS) turnip
+	$(COVERAGE) run -m unittest discover $(ARGS) turnip
+	$(COVERAGE) report
 
 # XXX jugmac00 2022-01-13:
 # this is a temporary solution to enable selecting single tests more easily

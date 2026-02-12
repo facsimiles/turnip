@@ -30,6 +30,7 @@ requires = [
     "zope.interface",
 ]
 test_requires = [
+    "coverage",
     "docutils",
     "extras",
     "fixtures",

@@ -20,5 +20,7 @@ turnip/version_info.py
 .tox/
 docs/_build/
 .testtools-wheel-build-env
+.coverage
+htmlcov/
 # do not track build artifacts
 *.charm

@@ -131,37 +131,46 @@ class TestPackFrontendServerProtocol(TestCase):
     def test_git_receive(self):
         self.proto.pauseProducing()
         self.proto.got_request = True
-        yield self.proto.requestReceived(
-            b"git-upload-pack", b"/foo.git", {b"host": b"example.com"}
-        )
-        self.assertEqual(b"git-upload-pack", self.proto.command)
+        with mock.patch.object(self.proto, "runOnBackend") as mock_run:
+            self.proto.requestReceived(
+                b"git-upload-pack",
+                b"/foo.git",
+                {b"host": b"example.com"},
+            )
+            mock_run.assert_called_once()
+            command = mock_run.call_args[0][0]
+            self.assertEqual(b"git-upload-pack", command)
         self.transport.loseConnection()
 
     def test_git_receive_with_version_param(self):
         self.proto.pauseProducing()
         self.proto.got_request = True
-        yield self.proto.requestReceived(
-            b"git-upload-pack",
-            b"/test_repo",
-            {b"host": "example.com", "version": "2"},
-        ),
-        self.assertIn(b"host", self.proto.params)
-        self.assertIn("version", self.proto.params)
+        with mock.patch.object(self.proto, "runOnBackend") as mock_run:
+            self.proto.requestReceived(
+                b"git-upload-pack",
+                b"/test_repo",
+                {b"host": b"example.com", b"version": b"2"},
+            )
+            mock_run.assert_called_once()
+            params = mock_run.call_args[0][2]
+            self.assertIn(b"host", params)
+            self.assertIn(b"version", params)
         self.transport.loseConnection()
 
     def test_git_receive_with_extra_undefined_params(self):
         self.proto.pauseProducing()
         self.proto.got_request = True
-        yield self.proto.requestReceived(
-            b"git-upload-pack",
-            b"/test_repo",
-            {
-                b"host": "example.com",
-                "version": "2",
-                "undefined_param": "value",
-            },
-        ),
-        self.assertIsNone(self.proto.params)
+        with mock.patch.object(self.proto, "runOnBackend") as mock_run:
+            self.proto.requestReceived(
+                b"git-upload-pack",
+                b"/test_repo",
+                {
+                    b"host": b"example.com",
+                    b"version": b"2",
+                    b"undefined_param": b"value",
+                },
+            )
+            mock_run.assert_not_called()
         self.assertKilledWith(b"Illegal request parameters")
         self.transport.loseConnection()
 
