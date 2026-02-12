@@ -10,7 +10,7 @@ import pygit2
 import six
 from fixtures import MonkeyPatch, TempDir
 from testtools import TestCase
-from testtools.deferredruntest import AsynchronousDeferredRunTest
+from testtools.twistedsupport import AsynchronousDeferredRunTest
 from twisted.internet import defer, protocol, reactor
 
 from turnip.pack import hookrpc

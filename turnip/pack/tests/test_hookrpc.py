@@ -7,16 +7,16 @@ import uuid
 from xmlrpc.client import Binary
 
 from testtools import ExpectedException, TestCase
-from testtools.deferredruntest import (
-    AsynchronousDeferredRunTest,
-    assert_fails_with,
-)
 from testtools.matchers import (
     Equals,
     IsInstance,
     MatchesAll,
     MatchesListwise,
     MatchesStructure,
+)
+from testtools.twistedsupport import (
+    AsynchronousDeferredRunTest,
+    assert_fails_with,
 )
 from twisted.internet import defer, reactor, task, testing
 from twisted.web import server, xmlrpc

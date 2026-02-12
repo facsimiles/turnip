@@ -31,6 +31,7 @@ requires = [
 ]
 test_requires = [
     "docutils",
+    "extras",
     "fixtures",
     "testscenarios",
     "testtools",

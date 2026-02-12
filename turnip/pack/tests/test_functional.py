@@ -18,9 +18,6 @@ from pygit2 import GIT_OID_HEX_ZERO
 from testscenarios.testcase import WithScenarios
 from testtools import TestCase
 from testtools.content import text_content
-from testtools.deferredruntest import (
-    AsynchronousDeferredRunTestForBrokenTwisted,
-)
 from testtools.matchers import (
     Equals,
     Is,
@@ -28,6 +25,9 @@ from testtools.matchers import (
     MatchesListwise,
     Not,
     StartsWith,
+)
+from testtools.twistedsupport import (
+    AsynchronousDeferredRunTestForBrokenTwisted,
 )
 from twisted.internet import defer, reactor, utils
 from twisted.web import client, http_headers, server, xmlrpc

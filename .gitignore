@@ -19,5 +19,6 @@ TAGS
 turnip/version_info.py
 .tox/
 docs/_build/
+.testtools-wheel-build-env
 # do not track build artifacts
 *.charm
