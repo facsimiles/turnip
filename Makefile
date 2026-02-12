@@ -178,8 +178,9 @@ copy-certificates:
 	cat turnip.crt turnip.key > /var/lib/haproxy/default.pem
 
 copy-haproxy-turnip-http-config:
-	cat /etc/haproxy/haproxy.cfg haproxy-turnip-http.cfg > /tmp/haproxy.cfg
-	mv /tmp/haproxy.cfg /etc/haproxy/
+	sed -i '/^\# BEGIN TURNIP$$/,$$d' /etc/haproxy/haproxy.cfg
+	echo '# BEGIN TURNIP' >> /etc/haproxy/haproxy.cfg
+	cat haproxy-turnip-http.cfg >> /etc/haproxy/haproxy.cfg
 
 reload-haproxy: copy-certificates copy-haproxy-turnip-http-config
 	systemctl reload haproxy
