@@ -18,7 +18,7 @@ fixtures==3.0.0
 future==0.18.2
 gevent==20.6.2
 greenlet==0.4.16
-gunicorn==20.1.0
+gunicorn==23.0.0
 hupper==1.10.2
 hyperlink==19.0.0
 idna==2.9
@@ -27,6 +27,7 @@ kombu==4.6.11
 lazr.sshserver==0.1.15
 linecache2==1.0.0
 lxml==4.5.2
+packaging==26.0
 Paste==3.5.0
 PasteDeploy==2.1.0
 pbr==5.4.5
